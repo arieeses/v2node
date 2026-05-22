@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	log "github.com/sirupsen/logrus"
+
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/counter"
 	"github.com/wyx2685/v2node/common/format"
@@ -54,7 +56,11 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 		err = userManager.RemoveUser(ctx, user)
 		cancel()
 		if err != nil {
-			return err
+			log.WithFields(log.Fields{
+				"tag":  tag,
+				"user": user,
+				"err":  err,
+			}).Warn("Remove user from xray failed (might be already removed or not added yet)")
 		}
 		vc.users.uidMap.Delete(user)
 		if v, ok := vc.dispatcher.Counter.Load(tag); ok {
@@ -161,16 +167,27 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	for _, u := range users {
 		mUser, err := u.ToMemoryUser()
 		if err != nil {
-			return 0, err
+			log.WithFields(log.Fields{
+				"tag":  p.Tag,
+				"user": u.Email,
+				"err":  err,
+			}).Error("Convert user to memory user failed")
+			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err = man.AddUser(ctx, mUser)
 		cancel()
 		if err != nil {
-			return 0, err
+			log.WithFields(log.Fields{
+				"tag":  p.Tag,
+				"user": mUser.Email,
+				"err":  err,
+			}).Warn("Add user to xray failed (might be already added)")
+			continue
 		}
+		added++
 	}
-	return len(users), nil
+	return added, nil
 }
 
 func buildVmessUsers(tag string, userInfo []panel.UserInfo) (users []*protocol.User) {
