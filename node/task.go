@@ -122,8 +122,9 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		log.WithField("tag", c.tag).Debug("Node info no change")
 	}
 
-	// get user info
-	newU, err := c.apiClient.GetUserList(ctx)
+	// get user info — ETag is NOT committed here; we hold newEtag
+	// and only commit it after c.userList is successfully updated.
+	newU, newEtag, err := c.apiClient.GetUserList(ctx)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
@@ -134,17 +135,16 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		}).Error("Get user list failed")
 		return nil
 	}
-	// get user alive
+
+	// get user alive — do NOT let this block user sync.
+	// If it fails or times out, we still proceed with user changes.
 	newA, err := c.apiClient.GetUserAlive(ctx)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 			"err": err,
-		}).Error("Get alive list failed")
-		return nil
+		}).Warn("Get alive list failed, proceeding with user sync")
+		// Don't return — continue with user sync
 	}
 
 	// update alive list
@@ -187,7 +187,10 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		// update Limiter
 		c.limiter.UpdateUser(c.tag, added, deleted, modified)
 	}
+	// SUCCESS: both xray state and local cache are now consistent.
+	// Only NOW commit the ETag so next cycle sends the correct value.
 	c.userList = newU
+	c.apiClient.CommitUserEtag(newEtag)
 	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
 	return nil
 }

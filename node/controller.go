@@ -52,10 +52,12 @@ func (c *Controller) Start(x *core.V2Core) error {
 		node = c.info
 	}
 	// Update user
-	c.userList, err = c.apiClient.GetUserList(context.Background())
+	var initEtag string
+	c.userList, initEtag, err = c.apiClient.GetUserList(context.Background())
 	if err != nil {
 		return fmt.Errorf("get user list error: %s", err)
 	}
+	c.apiClient.CommitUserEtag(initEtag)
 	if len(c.userList) == 0 {
 		return errors.New("add users error: not have any user")
 	}

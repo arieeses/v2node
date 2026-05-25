@@ -32,34 +32,43 @@ type AliveMap struct {
 	Alive map[int]int `json:"alive"`
 }
 
-// GetUserList will pull user from v2board
-func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
+// GetUserList will pull user from v2board.
+// Returns (users, newEtag, error). The caller MUST only commit the
+// returned ETag (via CommitUserEtag) after successfully applying the
+// user list. This prevents ETag/userList desync when downstream
+// processing is interrupted by timeouts or errors.
+func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, string, error) {
 	const path = "/api/v1/server/UniProxy/user"
 	r, err := c.client.R().
 		SetContext(ctx).
+		SetHeader("If-None-Match", c.userEtag).
 		SetHeader("X-Response-Format", "msgpack").
 		SetDoNotParseResponse(true).
 		Get(path)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if r == nil || r.RawResponse == nil {
-		return nil, fmt.Errorf("received nil response or raw response")
+		return nil, "", fmt.Errorf("received nil response or raw response")
 	}
 	defer r.RawResponse.Body.Close()
 
+	if r.StatusCode() == 304 {
+		return nil, "", nil
+	}
+	newEtag := r.Header().Get("ETag")
 	userlist := &UserListBody{}
 	if strings.Contains(r.Header().Get("Content-Type"), "application/x-msgpack") {
 		decoder := msgpack.NewDecoder(r.RawResponse.Body)
 		if err := decoder.Decode(userlist); err != nil {
-			return nil, fmt.Errorf("decode user list error: %w", err)
+			return nil, "", fmt.Errorf("decode user list error: %w", err)
 		}
 	} else {
 		dec := jsontext.NewDecoder(r.RawResponse.Body)
 		for {
 			tok, err := dec.ReadToken()
 			if err != nil {
-				return nil, fmt.Errorf("decode user list error: %w", err)
+				return nil, "", fmt.Errorf("decode user list error: %w", err)
 			}
 			if tok.Kind() == '"' && tok.String() == "users" {
 				break
@@ -67,24 +76,32 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 		}
 		tok, err := dec.ReadToken()
 		if err != nil {
-			return nil, fmt.Errorf("decode user list error: %w", err)
+			return nil, "", fmt.Errorf("decode user list error: %w", err)
 		}
 		if tok.Kind() != '[' {
-			return nil, fmt.Errorf(`decode user list error: expected "users" array`)
+			return nil, "", fmt.Errorf(`decode user list error: expected "users" array`)
 		}
 		for dec.PeekKind() != ']' {
 			val, err := dec.ReadValue()
 			if err != nil {
-				return nil, fmt.Errorf("decode user list error: read user object: %w", err)
+				return nil, "", fmt.Errorf("decode user list error: read user object: %w", err)
 			}
 			var u UserInfo
 			if err := json.Unmarshal(val, &u); err != nil {
-				return nil, fmt.Errorf("decode user list error: unmarshal user error: %w", err)
+				return nil, "", fmt.Errorf("decode user list error: unmarshal user error: %w", err)
 			}
 			userlist.Users = append(userlist.Users, u)
 		}
 	}
-	return userlist.Users, nil
+	return userlist.Users, newEtag, nil
+}
+
+// CommitUserEtag saves the ETag. Call this ONLY after the user list
+// has been successfully applied to xray core and c.userList updated.
+func (c *Client) CommitUserEtag(etag string) {
+	if etag != "" {
+		c.userEtag = etag
+	}
 }
 
 // GetUserAlive will fetch the alive_ip count for users
