@@ -37,7 +37,6 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 	const path = "/api/v1/server/UniProxy/user"
 	r, err := c.client.R().
 		SetContext(ctx).
-		SetHeader("If-None-Match", c.userEtag).
 		SetHeader("X-Response-Format", "msgpack").
 		SetDoNotParseResponse(true).
 		Get(path)
@@ -49,9 +48,6 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 	}
 	defer r.RawResponse.Body.Close()
 
-	if r.StatusCode() == 304 {
-		return nil, nil
-	}
 	userlist := &UserListBody{}
 	if strings.Contains(r.Header().Get("Content-Type"), "application/x-msgpack") {
 		decoder := msgpack.NewDecoder(r.RawResponse.Body)
@@ -88,7 +84,6 @@ func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, error) {
 			userlist.Users = append(userlist.Users, u)
 		}
 	}
-	c.userEtag = r.Header().Get("ETag")
 	return userlist.Users, nil
 }
 
