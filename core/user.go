@@ -50,17 +50,14 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 		return fmt.Errorf("get user manager error: %s", err)
 	}
 	var user string
+	var notFoundCount int
 	for i := range users {
 		user = format.UserTag(tag, users[i].Uuid)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err = userManager.RemoveUser(ctx, user)
 		cancel()
 		if err != nil {
-			log.WithFields(log.Fields{
-				"tag":  tag,
-				"user": user,
-				"err":  err,
-			}).Warn("Remove user from xray failed (might be already removed or not added yet)")
+			notFoundCount++
 		}
 		vc.users.uidMap.Delete(user)
 		if v, ok := vc.dispatcher.Counter.Load(tag); ok {
@@ -72,6 +69,13 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 			lm.CloseAll()
 			vc.dispatcher.LinkManagers.Delete(user)
 		}
+	}
+	if notFoundCount > 0 {
+		log.WithFields(log.Fields{
+			"tag":   tag,
+			"total": len(users),
+			"not_found": notFoundCount,
+		}).Warn("Some users not found in xray during removal (phantom users from previous desync)")
 	}
 	return nil
 }

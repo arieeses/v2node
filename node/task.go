@@ -156,6 +156,15 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		log.WithField("tag", c.tag).Debug("User list no change")
 		return nil
 	}
+
+	// CHECKPOINT: If the task timed out during API calls above, a leaked
+	// goroutine may still reach here. We MUST NOT modify xray state or
+	// commit userList/ETag, as a new cycle may already be running.
+	if ctx.Err() != nil {
+		log.WithField("tag", c.tag).Warn("Context cancelled after API calls, aborting user sync to prevent desync")
+		return ctx.Err()
+	}
+
 	deleted, added, modified := compareUserList(c.userList, newU)
 	if len(deleted) > 0 {
 		// have deleted users
@@ -187,6 +196,15 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		// update Limiter
 		c.limiter.UpdateUser(c.tag, added, deleted, modified)
 	}
+
+	// FINAL CHECKPOINT: Verify context is still valid before committing.
+	// Even if we passed the first check, the timeout may have fired during
+	// DelUsers/AddUsers processing. A leaked goroutine must NEVER commit.
+	if ctx.Err() != nil {
+		log.WithField("tag", c.tag).Warn("Context cancelled during user processing, discarding state to prevent desync")
+		return ctx.Err()
+	}
+
 	// SUCCESS: both xray state and local cache are now consistent.
 	// Only NOW commit the ETag so next cycle sends the correct value.
 	c.userList = newU
