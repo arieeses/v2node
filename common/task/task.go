@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -12,30 +13,28 @@ type Task struct {
 	Name     string
 	Interval time.Duration
 	Execute  func(context.Context) error
+	Access   sync.RWMutex
+	Running  bool
 	ReloadCh chan struct{}
-
-	mu      sync.Mutex
-	running bool
-	stop    chan struct{}
-	cancel  context.CancelFunc
+	Stop     chan struct{}
 }
 
 func (t *Task) Start(first bool) error {
-	t.mu.Lock()
-	if t.running {
-		t.mu.Unlock()
+	t.Access.Lock()
+	if t.Running {
+		t.Access.Unlock()
 		return nil
 	}
-	t.running = true
-	t.stop = make(chan struct{})
-	t.mu.Unlock()
-
+	t.Running = true
+	t.Stop = make(chan struct{})
+	t.Access.Unlock()
 	go func() {
 		timer := time.NewTimer(t.Interval)
 		defer timer.Stop()
-
 		if first {
-			t.executeTask()
+			if err := t.ExecuteWithTimeout(); err != nil {
+				return
+			}
 		}
 
 		for {
@@ -43,44 +42,59 @@ func (t *Task) Start(first bool) error {
 			select {
 			case <-timer.C:
 				// continue
-			case <-t.stop:
+			case <-t.Stop:
 				return
 			}
 
-			t.executeTask()
+			if err := t.ExecuteWithTimeout(); err != nil {
+				log.Errorf("Task %s execution error: %v", t.Name, err)
+				return
+			}
 		}
 	}()
 
 	return nil
 }
 
-func (t *Task) executeTask() {
-	// Create a context that is only cancelled when Close() is called.
-	// No timeout — HTTP-level timeouts (resty 15s + 1 retry) handle
-	// slow connections. This eliminates leaked goroutines entirely.
-	ctx, cancel := context.WithCancel(context.Background())
+func (t *Task) ExecuteWithTimeout() error {
+	ctx, cancel := context.WithTimeout(context.Background(), min(5*t.Interval, 5*time.Minute))
+	defer cancel()
+	done := make(chan error, 1)
 
-	t.mu.Lock()
-	t.cancel = cancel
-	t.mu.Unlock()
+	go func() {
+		done <- t.Execute(ctx)
+	}()
 
-	err := t.Execute(ctx)
-	cancel()
-
-	if err != nil {
-		log.Warnf("Task %s execution error: %v", t.Name, err)
+	select {
+	case <-ctx.Done():
+		log.Errorf("Task %s execution timed out, reloading", t.Name)
+		if t.ReloadCh != nil {
+			select {
+			case t.ReloadCh <- struct{}{}:
+			default:
+			}
+		} else {
+			log.Panic("Reload failed")
+		}
+		return nil
+	case err := <-done:
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil
+		}
+		return err
 	}
 }
 
-func (t *Task) Close() {
-	t.mu.Lock()
-	if t.running {
-		t.running = false
-		close(t.stop)
-		if t.cancel != nil {
-			t.cancel()
-		}
+func (t *Task) safeStop() {
+	t.Access.Lock()
+	if t.Running {
+		t.Running = false
+		close(t.Stop)
 	}
-	t.mu.Unlock()
+	t.Access.Unlock()
+}
+
+func (t *Task) Close() {
+	t.safeStop()
 	log.Warningf("Task %s stopped", t.Name)
 }

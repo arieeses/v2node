@@ -14,14 +14,14 @@ import (
 func (c *Controller) startTasks(node *panel.NodeInfo) {
 	// fetch node info task
 	c.nodeInfoMonitorPeriodic = &task.Task{
-		Name:     "nodeInfoMonitor[" + c.tag + "]",
+		Name:     "nodeInfoMonitor",
 		Interval: node.PullInterval,
 		Execute:  c.nodeInfoMonitor,
 		ReloadCh: c.server.ReloadCh,
 	}
 	// fetch user list task
 	c.userReportPeriodic = &task.Task{
-		Name:     "reportUserTrafficTask[" + c.tag + "]",
+		Name:     "reportUserTrafficTask",
 		Interval: node.PushInterval,
 		Execute:  c.reportUserTrafficTask,
 		ReloadCh: c.server.ReloadCh,
@@ -64,66 +64,21 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	if newN != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
-		}).Info("Node info changed, updating inbound in-place")
-		// In-place update: remove old inbound, add new one, re-add users
-		// This avoids destroying the entire Xray Core and killing all connections
-		err = c.server.DelNode(c.tag)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Error("Failed to remove old inbound during update, triggering reload")
-			if c.server.ReloadCh != nil {
-				select {
-				case c.server.ReloadCh <- struct{}{}:
-				default:
-				}
+		}).Error("Got new node info, reload")
+		if c.server.ReloadCh != nil {
+			select {
+			case c.server.ReloadCh <- struct{}{}:
+			default:
 			}
-			return nil
+		} else {
+			log.Panic("Reload failed")
 		}
-		err = c.server.AddNode(c.tag, newN)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": c.tag,
-				"err": err,
-			}).Error("Failed to add new inbound during update, triggering reload")
-			if c.server.ReloadCh != nil {
-				select {
-				case c.server.ReloadCh <- struct{}{}:
-				default:
-				}
-			}
-			return nil
-		}
-		// Re-add all current users to the new inbound
-		if len(c.userList) > 0 {
-			_, err = c.server.AddUsers(&vCore.AddUsersParams{
-				Tag:      c.tag,
-				NodeInfo: newN,
-				Users:    c.userList,
-			})
-			if err != nil {
-				log.WithFields(log.Fields{
-					"tag": c.tag,
-					"err": err,
-				}).Error("Failed to re-add users during update, triggering reload")
-				if c.server.ReloadCh != nil {
-					select {
-					case c.server.ReloadCh <- struct{}{}:
-					default:
-					}
-				}
-				return nil
-			}
-		}
-		c.info = newN
-		log.WithField("tag", c.tag).Info("Node inbound updated successfully without restart")
-	} else {
-		log.WithField("tag", c.tag).Debug("Node info no change")
 	}
+	log.WithField("tag", c.tag).Debug("Node info no change")
 
 	// get user info — ETag is NOT committed here; we hold newEtag
 	// and only commit it after c.userList is successfully updated.
+	// FIX: prevents ETag/userList desync when downstream processing fails.
 	newU, newEtag, err := c.apiClient.GetUserList(ctx)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -136,8 +91,8 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		return nil
 	}
 
-	// get user alive — do NOT let this block user sync.
-	// If it fails or times out, we still proceed with user changes.
+	// get user alive — FIX: do NOT let this block user sync.
+	// If it fails, we still proceed with user changes.
 	newA, err := c.apiClient.GetUserAlive(ctx)
 	if err != nil {
 		log.WithFields(log.Fields{
@@ -187,7 +142,8 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		// update Limiter
 		c.limiter.UpdateUser(c.tag, added, deleted, modified)
 	}
-	// SUCCESS: commit ETag only after userList is updated.
+	// FIX: commit ETag only AFTER userList is updated, guaranteeing
+	// they are always in sync. This is the only change vs upstream.
 	c.userList = newU
 	c.apiClient.CommitUserEtag(newEtag)
 	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
