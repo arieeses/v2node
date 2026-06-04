@@ -64,17 +64,43 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	if newN != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
-		}).Error("Got new node info, reload")
-		if c.server.ReloadCh != nil {
-			select {
-			case c.server.ReloadCh <- struct{}{}:
-			default:
-			}
-		} else {
-			log.Panic("Reload failed")
+		}).Info("Node info changed, updating in-place")
+		// In-place update: only this node's inbound is replaced.
+		// All other nodes and their connections remain untouched.
+		if err = c.server.DelNode(c.tag); err != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Error("Failed to remove old inbound")
+			return nil
 		}
+		if err = c.server.AddNode(c.tag, newN); err != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Error("Failed to add new inbound")
+			return nil
+		}
+		// Re-add all current users to the new inbound
+		if len(c.userList) > 0 {
+			_, err = c.server.AddUsers(&vCore.AddUsersParams{
+				Tag:      c.tag,
+				NodeInfo: newN,
+				Users:    c.userList,
+			})
+			if err != nil {
+				log.WithFields(log.Fields{
+					"tag": c.tag,
+					"err": err,
+				}).Error("Failed to re-add users after inbound update")
+				return nil
+			}
+		}
+		c.info = newN
+		log.WithField("tag", c.tag).Info("Node inbound updated without restart")
+	} else {
+		log.WithField("tag", c.tag).Debug("Node info no change")
 	}
-	log.WithField("tag", c.tag).Debug("Node info no change")
 
 	// get user info — ETag is NOT committed here; we hold newEtag
 	// and only commit it after c.userList is successfully updated.
