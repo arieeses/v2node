@@ -174,13 +174,12 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		// update Limiter
 		c.limiter.UpdateUser(c.tag, added, deleted, modified)
 	}
-	// FIX: final guard — if context was cancelled during user operations,
-	// do NOT commit. This prevents leaked goroutines from overwriting
-	// newer ETag/userList with stale data.
-	if ctx.Err() != nil {
-		log.WithField("tag", c.tag).Warn("Leaked goroutine detected before commit, discarding stale state")
-		return nil
-	}
+	// NOTE: do NOT check ctx.Err() here. Once we have already executed
+	// DelUsers/AddUsers above, xray core state has been modified.
+	// We MUST commit c.userList to keep it in sync with xray core.
+	// Aborting the commit would create a permanent desync where users
+	// are removed from xray but still appear in c.userList, making
+	// them invisible to future compareUserList and permanently locked out.
 	c.userList = newU
 	c.apiClient.CommitUserEtag(newEtag)
 	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
