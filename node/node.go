@@ -1,7 +1,6 @@
 package node
 
 import (
-	"context"
 	"fmt"
 
 	log "github.com/sirupsen/logrus"
@@ -25,7 +24,7 @@ func New(nodes []conf.NodeConfig) (*Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		info, err := p.GetNodeInfo(context.Background())
+		info, err := p.GetNodeInfo()
 		if err != nil {
 			return nil, err
 		}

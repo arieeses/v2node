@@ -1,7 +1,6 @@
 package node
 
 import (
-	"context"
 	"errors"
 	"fmt"
 
@@ -45,7 +44,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 	// First fetch Node Info
 	node := c.info
 	if node == nil {
-		c.info, err = c.apiClient.GetNodeInfo(context.Background())
+	c.info, err = c.apiClient.GetNodeInfo()
 		if err != nil {
 			return fmt.Errorf("get node info error: %s", err)
 		}
@@ -53,7 +52,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 	}
 	// Update user
 	var initEtag string
-	c.userList, initEtag, err = c.apiClient.GetUserList(context.Background())
+	c.userList, initEtag, err = c.apiClient.GetUserList()
 	if err != nil {
 		return fmt.Errorf("get user list error: %s", err)
 	}
@@ -61,7 +60,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 	if len(c.userList) == 0 {
 		return errors.New("add users error: not have any user")
 	}
-	c.aliveMap, err = c.apiClient.GetUserAlive(context.Background())
+	c.aliveMap, err = c.apiClient.GetUserAlive()
 	if err != nil {
 		return fmt.Errorf("failed to get user alive list: %s", err)
 	}

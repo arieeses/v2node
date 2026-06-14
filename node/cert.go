@@ -1,7 +1,6 @@
 package node
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -16,7 +15,7 @@ import (
 	"github.com/wyx2685/v2node/common/file"
 )
 
-func (c *Controller) renewCertTask(_ context.Context) error {
+func (c *Controller) renewCertTask() error {
 	l, err := NewLego(c.info.Common.CertInfo)
 	if err != nil {
 		log.WithField("tag", c.tag).Info("new lego error: ", err)

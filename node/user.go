@@ -1,14 +1,11 @@
 package node
 
 import (
-	"context"
-	"errors"
-
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
 )
 
-func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
+func (c *Controller) reportUserTrafficTask() (err error) {
 	var reportmin = 0
 	var devicemin = 0
 	if c.info.Common.BaseConfig != nil {
@@ -17,7 +14,7 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	}
 	userTraffic, _ := c.server.GetUserTrafficSlice(c.tag, reportmin)
 	if len(userTraffic) > 0 {
-		err = c.apiClient.ReportUserTraffic(ctx, userTraffic)
+		err = c.apiClient.ReportUserTraffic(userTraffic)
 		if err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
@@ -25,9 +22,6 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 			}).Info("Report user traffic failed, adding traffic back to counters")
 			// Add unreported traffic back so it's not lost
 			c.server.AddBackTraffic(c.tag, userTraffic)
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
 		} else {
 			log.WithField("tag", c.tag).Infof("Report %d users traffic", len(userTraffic))
 		}
@@ -66,15 +60,12 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 			data[onlineuser.UID] = append(data[onlineuser.UID], onlineuser.IP)
 		}
 		if len(data) != 0 {
-			err := c.apiClient.ReportNodeOnlineUsers(ctx, &data)
+			err := c.apiClient.ReportNodeOnlineUsers(&data)
 			if err != nil {
 				log.WithFields(log.Fields{
 					"tag": c.tag,
 					"err": err,
 				}).Info("Report online users failed")
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return err
-				}
 			}
 		}
 		log.WithField("tag", c.tag).Infof("Total %d online users, %d Reported", len(*onlineDevice), len(result))

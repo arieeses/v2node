@@ -1,8 +1,6 @@
 package panel
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -36,11 +34,10 @@ type AliveMap struct {
 // Returns (users, newEtag, error). The caller MUST only commit the
 // returned ETag (via CommitUserEtag) after successfully applying the
 // user list. This prevents ETag/userList desync when downstream
-// processing is interrupted by timeouts or errors.
-func (c *Client) GetUserList(ctx context.Context) ([]UserInfo, string, error) {
+// processing is interrupted by errors.
+func (c *Client) GetUserList() ([]UserInfo, string, error) {
 	const path = "/api/v1/server/UniProxy/user"
 	r, err := c.client.R().
-		SetContext(ctx).
 		SetHeader("If-None-Match", c.userEtag).
 		SetHeader("X-Response-Format", "msgpack").
 		SetDoNotParseResponse(true).
@@ -105,17 +102,13 @@ func (c *Client) CommitUserEtag(etag string) {
 }
 
 // GetUserAlive will fetch the alive_ip count for users
-func (c *Client) GetUserAlive(ctx context.Context) (map[int]int, error) {
+func (c *Client) GetUserAlive() (map[int]int, error) {
 	c.AliveMap = &AliveMap{}
 	const path = "/api/v1/server/UniProxy/alivelist"
 	r, err := c.client.R().
-		SetContext(ctx).
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, err
-		}
 		c.AliveMap.Alive = make(map[int]int)
 		return c.AliveMap.Alive, nil
 	}
@@ -139,14 +132,13 @@ type UserTraffic struct {
 }
 
 // ReportUserTraffic reports the user traffic
-func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffic) error {
+func (c *Client) ReportUserTraffic(userTraffic []UserTraffic) error {
 	data := make(map[int][]int64, len(userTraffic))
 	for i := range userTraffic {
 		data[userTraffic[i].UID] = []int64{userTraffic[i].Upload, userTraffic[i].Download}
 	}
 	const path = "/api/v1/server/UniProxy/push"
 	_, err := c.client.R().
-		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
 		Post(path)
@@ -156,10 +148,9 @@ func (c *Client) ReportUserTraffic(ctx context.Context, userTraffic []UserTraffi
 	return nil
 }
 
-func (c *Client) ReportNodeOnlineUsers(ctx context.Context, data *map[int][]string) error {
+func (c *Client) ReportNodeOnlineUsers(data *map[int][]string) error {
 	const path = "/api/v1/server/UniProxy/alive"
 	_, err := c.client.R().
-		SetContext(ctx).
 		SetBody(data).
 		ForceContentType("application/json").
 		Post(path)

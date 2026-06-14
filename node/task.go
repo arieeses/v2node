@@ -1,8 +1,6 @@
 package node
 
 import (
-	"context"
-	"errors"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -17,14 +15,12 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 		Name:     "nodeInfoMonitor[" + c.tag + "]",
 		Interval: node.PullInterval,
 		Execute:  c.nodeInfoMonitor,
-		ReloadCh: c.server.ReloadCh,
 	}
 	// fetch user list task
 	c.userReportPeriodic = &task.Task{
 		Name:     "reportUserTrafficTask[" + c.tag + "]",
 		Interval: node.PushInterval,
 		Execute:  c.reportUserTrafficTask,
-		ReloadCh: c.server.ReloadCh,
 	}
 	log.WithField("tag", c.tag).Info("Start monitor node status")
 	// delay to start nodeInfoMonitor
@@ -39,7 +35,6 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 				Name:     "renewCertTask",
 				Interval: time.Hour * 24,
 				Execute:  c.renewCertTask,
-				ReloadCh: c.server.ReloadCh,
 			}
 			log.WithField("tag", c.tag).Info("Start renew cert")
 			// delay to start renewCert
@@ -48,13 +43,14 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	}
 }
 
-func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
+// nodeInfoMonitor is a simple, synchronous function — no context, no
+// goroutine wrapping, no timeout cancellation. Each API call has its
+// own resty timeout. If one call fails, we log and move on.
+// This eliminates leaked goroutines and state desync entirely.
+func (c *Controller) nodeInfoMonitor() (err error) {
 	// get node info
-	newN, err := c.apiClient.GetNodeInfo(ctx)
+	newN, err := c.apiClient.GetNodeInfo()
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 			"err": err,
@@ -104,12 +100,8 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 
 	// get user info — ETag is NOT committed here; we hold newEtag
 	// and only commit it after c.userList is successfully updated.
-	// FIX: prevents ETag/userList desync when downstream processing fails.
-	newU, newEtag, err := c.apiClient.GetUserList(ctx)
+	newU, newEtag, err := c.apiClient.GetUserList()
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
 		log.WithFields(log.Fields{
 			"tag": c.tag,
 			"err": err,
@@ -117,9 +109,8 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		return nil
 	}
 
-	// get user alive — FIX: do NOT let this block user sync.
-	// If it fails, we still proceed with user changes.
-	newA, err := c.apiClient.GetUserAlive(ctx)
+	// get user alive — if it fails, we still proceed with user sync.
+	newA, err := c.apiClient.GetUserAlive()
 	if err != nil {
 		log.WithFields(log.Fields{
 			"tag": c.tag,
@@ -135,12 +126,6 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	// node no changed, check users
 	if len(newU) == 0 {
 		log.WithField("tag", c.tag).Debug("User list no change")
-		return nil
-	}
-	// FIX: if context is already cancelled, we are a leaked goroutine
-	// from a timed-out cycle. Abort to avoid overwriting newer state.
-	if ctx.Err() != nil {
-		log.WithField("tag", c.tag).Warn("Leaked goroutine detected after GetUserList, aborting commit")
 		return nil
 	}
 	deleted, added, modified := compareUserList(c.userList, newU)
@@ -174,12 +159,8 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		// update Limiter
 		c.limiter.UpdateUser(c.tag, added, deleted, modified)
 	}
-	// NOTE: do NOT check ctx.Err() here. Once we have already executed
-	// DelUsers/AddUsers above, xray core state has been modified.
-	// We MUST commit c.userList to keep it in sync with xray core.
-	// Aborting the commit would create a permanent desync where users
-	// are removed from xray but still appear in c.userList, making
-	// them invisible to future compareUserList and permanently locked out.
+	// Always commit — we are the only goroutine modifying this state,
+	// no leaks, no races, no desync possible.
 	c.userList = newU
 	c.apiClient.CommitUserEtag(newEtag)
 	log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))

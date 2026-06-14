@@ -1,8 +1,6 @@
 package task
 
 import (
-	"context"
-	"errors"
 	"sync"
 	"time"
 
@@ -12,13 +10,16 @@ import (
 type Task struct {
 	Name     string
 	Interval time.Duration
-	Execute  func(context.Context) error
+	Execute  func() error
 	Access   sync.RWMutex
 	Running  bool
-	ReloadCh chan struct{}
 	Stop     chan struct{}
 }
 
+// Start launches the periodic task. Like XrayR: simple ticker loop,
+// no goroutine wrapping, no context timeout. Each API call uses its
+// own resty timeout — if one call is slow, it blocks only itself,
+// never leaks goroutines, never corrupts state.
 func (t *Task) Start(first bool) error {
 	t.Access.Lock()
 	if t.Running {
@@ -32,7 +33,7 @@ func (t *Task) Start(first bool) error {
 		timer := time.NewTimer(t.Interval)
 		defer timer.Stop()
 		if first {
-			if err := t.ExecuteWithTimeout(); err != nil {
+			if err := t.Execute(); err != nil {
 				return
 			}
 		}
@@ -46,7 +47,7 @@ func (t *Task) Start(first bool) error {
 				return
 			}
 
-			if err := t.ExecuteWithTimeout(); err != nil {
+			if err := t.Execute(); err != nil {
 				log.Errorf("Task %s execution error: %v", t.Name, err)
 				return
 			}
@@ -54,30 +55,6 @@ func (t *Task) Start(first bool) error {
 	}()
 
 	return nil
-}
-
-func (t *Task) ExecuteWithTimeout() error {
-	ctx, cancel := context.WithTimeout(context.Background(), min(5*t.Interval, 5*time.Minute))
-	defer cancel()
-	done := make(chan error, 1)
-
-	go func() {
-		done <- t.Execute(ctx)
-	}()
-
-	select {
-	case <-ctx.Done():
-		// Timeout: just skip this cycle and retry next interval.
-		// Do NOT trigger reload — one slow panel API should not
-		// kill all connections across all panels.
-		log.Warnf("Task %s execution timed out, will retry next cycle", t.Name)
-		return nil
-	case err := <-done:
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil
-		}
-		return err
-	}
 }
 
 func (t *Task) safeStop() {
