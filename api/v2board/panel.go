@@ -33,10 +33,19 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	// before Cloudflare RSTs them (~60s). This prevents reads on dead
 	// connections that cause "connection reset by peer" and hangs.
 	client.SetTransport(&http.Transport{
-		IdleConnTimeout:       20 * time.Second,  // discard before CF kills at ~60s
-		TLSHandshakeTimeout:   10 * time.Second,  // don't hang on TLS
-		ResponseHeaderTimeout: 15 * time.Second,  // don't hang on slow API
-		MaxIdleConnsPerHost:   2,                  // limit pool size per panel
+		// CRITICAL: Disable HTTP/2. Go's HTTP/2 connection multiplexing causes
+		// "http2: timeout awaiting response headers" after long uptime because
+		// a single dead HTTP/2 connection silently blocks ALL requests to the
+		// same host. HTTP/1.1 with connection pooling is more resilient: each
+		// request gets its own TCP connection, so one dead connection doesn't
+		// block others.
+		ForceAttemptHTTP2:     false,
+		IdleConnTimeout:       20 * time.Second, // discard before CF kills at ~60s
+		TLSHandshakeTimeout:   10 * time.Second, // don't hang on TLS
+		ResponseHeaderTimeout: 15 * time.Second, // don't hang on slow API
+		MaxIdleConnsPerHost:   2,                // limit pool size per panel
+		MaxConnsPerHost:       4,                // cap total connections per panel
+		DisableKeepAlives:     false,            // reuse connections for performance
 	})
 	retryCount := conf.DefaultNodeRetryCount
 	if c.RetryCount != nil {
