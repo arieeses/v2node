@@ -43,12 +43,17 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		ForceAttemptHTTP2: false,
 		TLSNextProto:      make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
 
-		IdleConnTimeout:       20 * time.Second, // discard before CF kills at ~60s
 		TLSHandshakeTimeout:   10 * time.Second, // don't hang on TLS
 		ResponseHeaderTimeout: 15 * time.Second, // don't hang on slow API
-		MaxIdleConnsPerHost:   2,                // limit pool size per panel
-		MaxConnsPerHost:       4,                // cap total connections per panel
-		DisableKeepAlives:     false,            // reuse connections for performance
+		// CRITICAL: Disable keep-alive to force a fresh TCP+TLS connection per
+		// API call. v2node only hits the panel every ~60s, so the ~100ms TLS
+		// overhead is negligible. But reusing a keep-alive connection that
+		// Cloudflare/Nginx silently RST'd (after 1-3h) causes ALL subsequent
+		// requests to timeout, killing the heartbeat and making the panel mark
+		// the node as offline — even though Xray listeners are perfectly fine.
+		// This is the HTTP/1.1 equivalent of the HTTP/2 connection rot that
+		// caused OOM kills. Fresh connections every time = zero rot risk.
+		DisableKeepAlives: true,
 	})
 	retryCount := conf.DefaultNodeRetryCount
 	if c.RetryCount != nil {
