@@ -138,25 +138,31 @@ func (c *Client) ReportUserTraffic(userTraffic []UserTraffic) error {
 		data[userTraffic[i].UID] = []int64{userTraffic[i].Upload, userTraffic[i].Download}
 	}
 	const path = "/api/v1/server/UniProxy/push"
-	_, err := c.client.R().
+	resp, err := c.client.R().
 		SetBody(data).
 		ForceContentType("application/json").
 		Post(path)
 	if err != nil {
 		return err
 	}
+	if resp != nil && resp.IsError() {
+		return fmt.Errorf("server returned error: %d %s", resp.StatusCode(), resp.String())
+	}
 	return nil
 }
 
 func (c *Client) ReportNodeOnlineUsers(data *map[int][]string) error {
 	const path = "/api/v1/server/UniProxy/alive"
-	_, err := c.client.R().
+	resp, err := c.client.R().
 		SetBody(data).
 		ForceContentType("application/json").
 		Post(path)
 
 	if err != nil {
 		return err
+	}
+	if resp != nil && resp.IsError() {
+		return fmt.Errorf("server returned error: %d %s", resp.StatusCode(), resp.String())
 	}
 
 	return nil
