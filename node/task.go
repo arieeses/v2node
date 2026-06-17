@@ -69,11 +69,27 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 			}).Error("Failed to remove old inbound")
 			return nil
 		}
-		if err = c.server.AddNode(c.tag, newN); err != nil {
+
+		// Xray listener shutdown is asynchronous; wait for port to be released
+		time.Sleep(time.Second)
+
+		var addErr error
+		for i := 0; i < 5; i++ {
+			addErr = c.server.AddNode(c.tag, newN)
+			if addErr == nil {
+				break
+			}
+			log.WithFields(log.Fields{"tag": c.tag, "err": addErr}).Warn("Retrying AddNode due to port conflict")
+			time.Sleep(time.Second * 2)
+		}
+
+		if addErr != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
-				"err": err,
-			}).Error("Failed to add new inbound")
+				"err": addErr,
+			}).Error("Failed to add new inbound after retries")
+			// We skip setting c.info so next time the node restarts it might pick up changes,
+			// though ETag cache will block it unless panel config actually changes again.
 			return nil
 		}
 		// Re-add all current users to the new inbound
