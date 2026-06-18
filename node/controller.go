@@ -62,7 +62,8 @@ func (c *Controller) Start(x *core.V2Core) error {
 	}
 	c.aliveMap, err = c.apiClient.GetUserAlive()
 	if err != nil {
-		return fmt.Errorf("failed to get user alive list: %s", err)
+		log.WithFields(log.Fields{"tag": c.tag, "err": err}).Warn("Get alive list failed, using empty")
+		c.aliveMap = make(map[int]int)
 	}
 	c.tag = node.Tag
 

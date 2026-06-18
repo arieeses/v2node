@@ -113,15 +113,16 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 	var usersChanged = true
 	newU, newEtag, err := c.apiClient.GetUserList()
 	if err != nil {
-		log.WithFields(log.Fields{
-			"tag": c.tag,
-			"err": err,
-		}).Error("Get user list failed")
-		return nil
-	}
-	if len(newU) == 0 {
-		usersChanged = false
-		newU = c.userList
+		if err.Error() == panel.UserNotModified {
+			usersChanged = false
+			newU = c.userList
+		} else {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Error("Get user list failed")
+			return nil
+		}
 	}
 
 	// get user alive — if it fails, we still proceed with user sync.

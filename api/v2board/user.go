@@ -1,14 +1,18 @@
 package panel
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/vmihailenco/msgpack/v5"
 )
+
+const UserNotModified = "UserNotModified"
 
 type OnlineUser struct {
 	UID int
@@ -51,7 +55,7 @@ func (c *Client) GetUserList() ([]UserInfo, string, error) {
 	defer r.RawResponse.Body.Close()
 
 	if r.StatusCode() == 304 {
-		return nil, "", nil
+		return nil, "", errors.New(UserNotModified)
 	}
 	newEtag := r.Header().Get("ETag")
 	userlist := &UserListBody{}
@@ -118,7 +122,7 @@ func (c *Client) GetUserAlive() (map[int]int, error) {
 	}
 	defer r.RawResponse.Body.Close()
 	if err := json.Unmarshal(r.Body(), c.AliveMap); err != nil {
-		fmt.Printf("unmarshal user alive list error: %s", err)
+		log.Errorf("unmarshal user alive list error: %s", err)
 		c.AliveMap.Alive = make(map[int]int)
 	}
 
