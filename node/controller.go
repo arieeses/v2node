@@ -43,12 +43,10 @@ func (c *Controller) Start(x *core.V2Core) error {
 	// First fetch Node Info
 	node := c.info
 	if node == nil {
-		var initEtag string
-		c.info, initEtag, err = c.apiClient.GetNodeInfo()
+		c.info, err = c.apiClient.GetNodeInfo()
 		if err != nil {
 			return fmt.Errorf("get node info error: %s", err)
 		}
-		c.apiClient.CommitNodeEtag(initEtag)
 		node = c.info
 	}
 	// Update user

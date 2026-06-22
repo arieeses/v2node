@@ -82,74 +82,65 @@ func nodeNeedsRebuild(old, new *panel.NodeInfo) bool {
 }
 
 // nodeInfoMonitor:
-// 1. Fetch node info (304 = not modified)
-// 2. If modified, compare critical fields only (not raw JSON bytes)
+// 1. Fetch node info (always 200, no ETag/304)
+// 2. Compare critical fields with nodeNeedsRebuild
 // 3. Only do DelNode+AddNode if listener config actually changed
 func (c *Controller) nodeInfoMonitor() (err error) {
-	// Fetch node info
-	var nodeInfoChanged = true
-	newN, newNodeEtag, err := c.apiClient.GetNodeInfo()
+	// Fetch node info — always returns fresh data (no ETag)
+	newN, err := c.apiClient.GetNodeInfo()
 	if err != nil {
-		if err.Error() == panel.NodeNotModified {
-			nodeInfoChanged = false
-			newN = c.info
-		} else {
+		log.WithFields(log.Fields{
+			"tag": c.tag,
+			"err": err,
+		}).Error("Get node info failed")
+		return nil
+	}
+
+	// Check if the config REALLY needs a port rebuild
+	var nodeInfoChanged = false
+	if nodeNeedsRebuild(c.info, newN) {
+		nodeInfoChanged = true
+		log.WithField("tag", c.tag).Info("Node config changed, rebuilding inbound")
+		// Remove old inbound
+		if err = c.server.DelNode(c.tag); err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
-			}).Error("Get node info failed")
+			}).Error("Failed to remove old inbound")
 			return nil
 		}
-	}
-
-	// If node info changed, check if it REALLY needs a port rebuild
-	if nodeInfoChanged {
-		if nodeNeedsRebuild(c.info, newN) {
-			log.WithField("tag", c.tag).Info("Node config changed, rebuilding inbound")
-			// Remove old inbound
-			if err = c.server.DelNode(c.tag); err != nil {
-				log.WithFields(log.Fields{
-					"tag": c.tag,
-					"err": err,
-				}).Error("Failed to remove old inbound")
-				return nil
-			}
-			// Wait for port to be released
-			time.Sleep(time.Second)
-			// Add new inbound (do NOT update c.info yet)
-			if err = c.server.AddNode(c.tag, newN); err != nil {
-				log.WithFields(log.Fields{
-					"tag": c.tag,
-					"err": err,
-				}).Error("Failed to add new inbound, will retry next cycle")
-				// c.info stays old → next cycle retries automatically
-				return nil
-			}
-			// Re-add all current users to the new inbound
-			if len(c.userList) > 0 {
-				_, err = c.server.AddUsers(&vCore.AddUsersParams{
-					Tag:      c.tag,
-					NodeInfo: newN,
-					Users:    c.userList,
-				})
-				if err != nil {
-					log.WithFields(log.Fields{
-						"tag": c.tag,
-						"err": err,
-					}).Error("Failed to re-add users after inbound update")
-					return nil
-				}
-			}
-			// Only update c.info and commit ETag AFTER everything succeeds
-			c.info = newN
-			c.apiClient.CommitNodeEtag(newNodeEtag)
-			log.WithField("tag", c.tag).Info("Node inbound updated")
-		} else {
-			// Config fetched but no rebuild needed — just commit ETag
-			c.info = newN
-			c.apiClient.CommitNodeEtag(newNodeEtag)
-			nodeInfoChanged = false
+		// Wait for port to be released
+		time.Sleep(time.Second)
+		// Add new inbound (do NOT update c.info yet)
+		if err = c.server.AddNode(c.tag, newN); err != nil {
+			log.WithFields(log.Fields{
+				"tag": c.tag,
+				"err": err,
+			}).Error("Failed to add new inbound, will retry next cycle")
+			// c.info stays old → next cycle retries automatically
+			return nil
 		}
+		// Re-add all current users to the new inbound
+		if len(c.userList) > 0 {
+			_, err = c.server.AddUsers(&vCore.AddUsersParams{
+				Tag:      c.tag,
+				NodeInfo: newN,
+				Users:    c.userList,
+			})
+			if err != nil {
+				log.WithFields(log.Fields{
+					"tag": c.tag,
+					"err": err,
+				}).Error("Failed to re-add users after inbound update")
+				return nil
+			}
+		}
+		// Only update c.info AFTER everything succeeds
+		c.info = newN
+		log.WithField("tag", c.tag).Info("Node inbound updated")
+	} else {
+		// No rebuild needed — just update non-critical fields (intervals, etc.)
+		c.info = newN
 	}
 
 	// Update users

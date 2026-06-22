@@ -1,7 +1,6 @@
 package panel
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -12,7 +11,6 @@ import (
 	"encoding/json"
 )
 
-const NodeNotModified = "NodeNotModified"
 
 // Security type
 const (
@@ -127,30 +125,21 @@ type EncSettings struct {
 }
 
 // GetNodeInfo fetches node config from the panel.
-// Returns (nil, "", error{NodeNotModified}) on 304.
-// Returns (nodeInfo, newEtag, nil) on 200 with valid data.
-// The caller MUST only commit the returned ETag (via CommitNodeEtag)
-// after successfully applying the node config. This prevents ETag/state
-// desync when AddNode fails.
-func (c *Client) GetNodeInfo() (node *NodeInfo, newEtag string, err error) {
+// Always fetches full config (no ETag/304) to ensure the panel
+// registers a heartbeat on every call. Change detection is handled
+// by nodeNeedsRebuild() in the caller.
+func (c *Client) GetNodeInfo() (node *NodeInfo, err error) {
 	const path = "/api/v2/server/config"
 	r, err := c.client.
 		R().
-		SetHeader("If-None-Match", c.nodeEtag).
 		ForceContentType("application/json").
 		Get(path)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if r == nil {
-		return nil, "", fmt.Errorf("received nil response")
+		return nil, fmt.Errorf("received nil response")
 	}
-
-	// ETag: 304 means not modified
-	if r.StatusCode() == 304 {
-		return nil, "", errors.New(NodeNotModified)
-	}
-	newEtag = r.Header().Get("ETag")
 
 	if r.RawBody() != nil {
 		defer r.RawBody().Close()
@@ -162,7 +151,7 @@ func (c *Client) GetNodeInfo() (node *NodeInfo, newEtag string, err error) {
 	cm := &CommonNode{}
 	err = json.Unmarshal(r.Body(), cm)
 	if err != nil {
-		return nil, "", fmt.Errorf("decode node params error: %s", err)
+		return nil, fmt.Errorf("decode node params error: %s", err)
 	}
 	switch cm.Protocol {
 	case "vmess", "trojan", "hysteria2", "tuic", "anytls", "vless", "shadowflow":
@@ -172,7 +161,7 @@ func (c *Client) GetNodeInfo() (node *NodeInfo, newEtag string, err error) {
 		node.Type = cm.Protocol
 		node.Security = 0
 	default:
-		return nil, "", fmt.Errorf("unsupport protocol: %s", cm.Protocol)
+		return nil, fmt.Errorf("unsupport protocol: %s", cm.Protocol)
 	}
 	node.Tag = fmt.Sprintf("[%s]-%s:%d", c.APIHost, node.Type, node.Id)
 	cf := cm.TlsSettings.CertFile
@@ -214,15 +203,7 @@ func (c *Client) GetNodeInfo() (node *NodeInfo, newEtag string, err error) {
 
 	node.Common = cm
 
-	return node, newEtag, nil
-}
-
-// CommitNodeEtag saves the ETag. Call this ONLY after the node config
-// has been successfully applied (AddNode succeeded).
-func (c *Client) CommitNodeEtag(etag string) {
-	if etag != "" {
-		c.nodeEtag = etag
-	}
+	return node, nil
 }
 
 func intervalToTime(i interface{}) time.Duration {
