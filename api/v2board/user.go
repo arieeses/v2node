@@ -1,7 +1,6 @@
 package panel
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -35,14 +34,19 @@ type AliveMap struct {
 }
 
 // GetUserList will pull user from v2board.
-// Returns (users, newEtag, error). The caller MUST only commit the
-// returned ETag (via CommitUserEtag) after successfully applying the
-// user list. This prevents ETag/userList desync when downstream
-// processing is interrupted by errors.
+// Returns (users, newEtag, error) and always fetches the full list.
+//
+// We deliberately do NOT send If-None-Match here. When a panel sits
+// behind a CDN (e.g. Cloudflare), the CDN caches the response together
+// with its ETag and serves stale 304s from the edge without consulting
+// the origin — even after the user data changed (new purchases, etc.).
+// That makes the node believe "no users changed" and skip sync for
+// hours, while different edge cache policies cause some nodes to sync
+// and others to stay stuck. The user list is only a few KB, so pulling
+// it fresh every cycle is negligible and guarantees correctness.
 func (c *Client) GetUserList() ([]UserInfo, string, error) {
 	const path = "/api/v1/server/UniProxy/user"
 	r, err := c.client.R().
-		SetHeader("If-None-Match", c.userEtag).
 		SetHeader("X-Response-Format", "msgpack").
 		SetDoNotParseResponse(true).
 		Get(path)
@@ -54,9 +58,6 @@ func (c *Client) GetUserList() ([]UserInfo, string, error) {
 	}
 	defer r.RawResponse.Body.Close()
 
-	if r.StatusCode() == 304 {
-		return nil, "", errors.New(UserNotModified)
-	}
 	newEtag := r.Header().Get("ETag")
 	userlist := &UserListBody{}
 	if strings.Contains(r.Header().Get("Content-Type"), "application/x-msgpack") {
