@@ -11,6 +11,12 @@ import (
 	vCore "github.com/wyx2685/v2node/core"
 )
 
+// userReconcileEvery is how many nodeInfoMonitor cycles pass between full
+// drift reconciles against actual core state. At the default 60s pull
+// interval this is ~5 minutes. Tune higher to reduce overhead, lower to
+// repair drift faster.
+const userReconcileEvery = 5
+
 func (c *Controller) startTasks(node *panel.NodeInfo) {
 	// fetch node info task
 	c.nodeInfoMonitorPeriodic = &task.Task{
@@ -214,6 +220,19 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 		log.WithField("tag", c.tag).Infof("%d user deleted, %d user added, %d user modified", len(deleted), len(added), len(modified))
 	}
 
+	// Periodic drift safety net: every userReconcileEvery cycles, compare the
+	// panel's desired users against what core ACTUALLY has and repair only the
+	// difference. The fast-path diff above trusts c.userList (the in-memory
+	// mirror); this catches any case where that mirror drifted from real core
+	// state (e.g. a user that ended up in c.userList but was never registered
+	// in xray). Only the differing users are touched — existing connections are
+	// never disturbed, so there is no downtime.
+	c.reconcileCounter++
+	if c.reconcileCounter >= userReconcileEvery {
+		c.reconcileCounter = 0
+		c.reconcileUsers(c.userList)
+	}
+
 	// Port health check: verify our listening port is still alive.
 	// Only for TCP-based protocols (skip hysteria2/tuic which use UDP).
 	if c.info != nil && c.info.Common != nil && c.info.Common.ServerPort > 0 {
@@ -256,4 +275,50 @@ func (c *Controller) nodeInfoMonitor() (err error) {
 	}
 
 	return nil
+}
+
+// reconcileUsers is the periodic drift safety net (XrayR-style targeted
+// repair): it diffs the panel's desired user set against the set actually
+// registered in core and applies ONLY the difference — adding users the
+// panel wants but core is missing, and removing users core still has but the
+// panel dropped. Existing users are left untouched, so there is no downtime.
+func (c *Controller) reconcileUsers(desired []panel.UserInfo) {
+	coreSet := c.server.GetUserUUIDs(c.tag)
+
+	desiredSet := make(map[string]struct{}, len(desired))
+	var missing []panel.UserInfo
+	for i := range desired {
+		desiredSet[desired[i].Uuid] = struct{}{}
+		if _, ok := coreSet[desired[i].Uuid]; !ok {
+			missing = append(missing, desired[i])
+		}
+	}
+
+	var extra []panel.UserInfo
+	for uuid := range coreSet {
+		if _, ok := desiredSet[uuid]; !ok {
+			extra = append(extra, panel.UserInfo{Uuid: uuid})
+		}
+	}
+
+	if len(missing) == 0 && len(extra) == 0 {
+		return
+	}
+
+	if len(extra) > 0 {
+		if err := c.server.DelUsers(extra, c.tag, c.info); err != nil {
+			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("Reconcile: delete extra users failed")
+		}
+	}
+	if len(missing) > 0 {
+		if _, err := c.server.AddUsers(&vCore.AddUsersParams{
+			Tag:      c.tag,
+			NodeInfo: c.info,
+			Users:    missing,
+		}); err != nil {
+			log.WithFields(log.Fields{"tag": c.tag, "err": err}).Error("Reconcile: add missing users failed")
+		}
+	}
+	c.limiter.UpdateUser(c.tag, missing, extra, nil)
+	log.WithField("tag", c.tag).Warnf("User drift reconciled: +%d missing added, -%d extra removed", len(missing), len(extra))
 }

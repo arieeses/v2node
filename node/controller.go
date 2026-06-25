@@ -23,6 +23,7 @@ type Controller struct {
 	nodeInfoMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
+	reconcileCounter        int
 }
 
 // NewController return a Node controller with default parameters.

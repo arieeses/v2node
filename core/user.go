@@ -44,6 +44,25 @@ func (v *V2Core) GetUserManager(tag string) (proxy.UserManager, error) {
 	return userManager, nil
 }
 
+// GetUserUUIDs returns the set of user UUIDs currently registered in core
+// for the given tag, derived from the uidMap (core's own record of which
+// users it has added). The periodic reconcile compares the panel's desired
+// user set against this to detect and repair drift, independent of the
+// controller's in-memory c.userList mirror.
+func (vc *V2Core) GetUserUUIDs(tag string) map[string]struct{} {
+	prefix := format.UserTag(tag, "")
+	set := make(map[string]struct{})
+	vc.users.uidMap.Range(func(key, _ any) bool {
+		if email, ok := key.(string); ok {
+			if uuid, found := strings.CutPrefix(email, prefix); found {
+				set[uuid] = struct{}{}
+			}
+		}
+		return true
+	})
+	return set
+}
+
 func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo) error {
 	userManager, err := vc.GetUserManager(tag)
 	if err != nil {
