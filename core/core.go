@@ -91,11 +91,17 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
 	var inBoundConfig []*core.InboundHandlerConfig
 
 	// Policy config
+	// ConnectionIdle = max seconds a connection may sit idle (no data either
+	// direction) before the core force-closes it. 120s held far too many idle
+	// connections open (≈2x XrayR for the same traffic) — browsers/apps open
+	// dozens of parallel TCP conns per user and they lingered for 2 minutes
+	// after going idle. 30s matches XrayR and sheds idle connections promptly;
+	// genuinely active connections (always have data) are unaffected.
 	levelPolicyConfig := &coreConf.Policy{
 		StatsUserUplink:   true,
 		StatsUserDownlink: true,
 		Handshake:         proto.Uint32(4),
-		ConnectionIdle:    proto.Uint32(120),
+		ConnectionIdle:    proto.Uint32(30),
 		UplinkOnly:        proto.Uint32(2),
 		DownlinkOnly:      proto.Uint32(4),
 		BufferSize:        proto.Int32(128),
