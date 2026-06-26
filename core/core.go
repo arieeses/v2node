@@ -90,21 +90,25 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
 	// Inbound config
 	var inBoundConfig []*core.InboundHandlerConfig
 
-	// Policy config
-	// ConnectionIdle = max seconds a connection may sit idle (no data either
-	// direction) before the core force-closes it. 120s held far too many idle
-	// connections open (≈2x XrayR for the same traffic) — browsers/apps open
-	// dozens of parallel TCP conns per user and they lingered for 2 minutes
-	// after going idle. 30s matches XrayR and sheds idle connections promptly;
-	// genuinely active connections (always have data) are unaffected.
+	// Policy config — tuned to match XrayR/soga's lean profile.
+	//
+	// BufferSize is the per-connection buffer in KB (xray multiplies it by
+	// 1024). It was 128 KB/conn, vs XrayR's 4 KB — a 32x difference that, at a
+	// few thousand concurrent connections, cost hundreds of MB of RAM for no
+	// benefit (splice/zero-copy already bypasses this buffer for unthrottled
+	// connections). 4 KB matches XrayR and is the single biggest memory win.
+	//
+	// ConnectionIdle = seconds a connection may sit idle before being closed.
+	// 60 matches XrayR — long enough to avoid churn, short enough to reclaim
+	// idle connections promptly (120s previously doubled the live conn count).
 	levelPolicyConfig := &coreConf.Policy{
 		StatsUserUplink:   true,
 		StatsUserDownlink: true,
-		Handshake:         proto.Uint32(4),
-		ConnectionIdle:    proto.Uint32(30),
+		Handshake:         proto.Uint32(10),
+		ConnectionIdle:    proto.Uint32(60),
 		UplinkOnly:        proto.Uint32(2),
 		DownlinkOnly:      proto.Uint32(4),
-		BufferSize:        proto.Int32(128),
+		BufferSize:        proto.Int32(4),
 	}
 	corePolicyConfig := &coreConf.PolicyConfig{}
 	corePolicyConfig.Levels = map[uint32]*coreConf.Policy{0: levelPolicyConfig}
