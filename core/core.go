@@ -83,12 +83,13 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
 		ErrorLog:  c.LogConfig.Output,
 	}
 	// Custom config
-	dnsConfig, outBoundConfig, routeConfig, err := GetCustomConfig(infos)
+	dnsConfig, outBoundConfig, routeConfig, customInbounds, err := GetCustomConfig(infos, c.Global)
 	if err != nil {
 		log.WithField("err", err).Panic("failed to build custom config")
 	}
-	// Inbound config
-	var inBoundConfig []*core.InboundHandlerConfig
+	// Inbound config (per-node inbounds are added later via AddNode; any
+	// custom local inbounds from InboundConfigPath start here).
+	inBoundConfig := customInbounds
 
 	// Policy config — tuned to match XrayR/soga's lean profile.
 	//
