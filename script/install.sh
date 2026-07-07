@@ -265,50 +265,20 @@ install_v2node() {
 
     mkdir /usr/local/v2node/ -p
     cd /usr/local/v2node/
-    if [[ "$version_param" == "main" || "$version_param" == "dev" ]]; then
-        echo -e "${green}开始安装 main 分支的最新编译版本...${plain}"
-        if [[ "$arch" == "arm64-v8a" ]]; then
-            url="https://raw.githubusercontent.com/clavin-dev/v2node/main/v2node-linux-arm64"
-        else
-            url="https://raw.githubusercontent.com/clavin-dev/v2node/main/v2node-linux-amd64"
-        fi
-        echo -e "${green}下载地址: ${url}${plain}"
-        curl -L -o /usr/local/v2node/v2node "$url"
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}从 main 分支下载 v2node 失败，请确保你的服务器能够下载 Github 的文件${plain}"
-            exit 1
-        fi
-    elif  [[ -z "$version_param" ]] ; then
-        last_version=$(curl -Ls "https://api.github.com/repos/clavin-dev/v2node/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [[ ! -n "$last_version" ]]; then
-            echo -e "${red}检测 v2node 版本失败，可能是超出 Github API 限制，请稍后再试，或手动指定 v2node 版本安装${plain}"
-            exit 1
-        fi
-        echo -e "${green}检测到最新版本：${last_version}，开始安装...${plain}"
-        if [[ "$arch" == "arm64-v8a" ]]; then
-            url="https://github.com/clavin-dev/v2node/releases/download/${last_version}/v2node-linux-arm64"
-        else
-            url="https://github.com/clavin-dev/v2node/releases/download/${last_version}/v2node-linux-amd64"
-        fi
-        echo -e "${green}下载地址: ${url}${plain}"
-        curl -L -o /usr/local/v2node/v2node "$url"
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 v2node 失败，请确保你的服务器能够下载 Github 的文件${plain}"
-            exit 1
-        fi
-    else
-        last_version=$version_param
-        if [[ "$arch" == "arm64-v8a" ]]; then
-            url="https://github.com/clavin-dev/v2node/releases/download/${last_version}/v2node-linux-arm64"
-        else
-            url="https://github.com/clavin-dev/v2node/releases/download/${last_version}/v2node-linux-amd64"
-        fi
-        echo -e "${green}下载地址: ${url}${plain}"
-        curl -L -o /usr/local/v2node/v2node "$url"
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 v2node $1 失败，请确保此版本存在${plain}"
-            exit 1
-        fi
+    # OOM/stability test build — pinned to the arieeses prerelease (batch-1).
+    # (Original version selection replaced so this installer always fetches the
+    # batch-1 test binary.)
+    echo -e "${green}安装 batch-1 测试版 (v0.4.6.11-oom-test)...${plain}"
+    if [[ "$arch" == "arm64-v8a" ]]; then
+        echo -e "${red}该测试版目前只提供 amd64，arm64 暂未构建${plain}"
+        exit 1
+    fi
+    url="https://github.com/arieeses/v2node/releases/download/oom-test-1/v2node-linux-amd64"
+    echo -e "${green}下载地址: ${url}${plain}"
+    curl -L -o /usr/local/v2node/v2node "$url"
+    if [[ $? -ne 0 ]]; then
+        echo -e "${red}下载 v2node 测试版失败，请确保服务器能访问 Github${plain}"
+        exit 1
     fi
 
     chmod +x v2node
