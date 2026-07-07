@@ -16,7 +16,7 @@ import (
 func TestCheckLimitConcurrent(t *testing.T) {
 	Init()
 	const tag, uuid, uid = "tc", "uc", 400
-	l := AddLimiter("v2ray", tag, []panel.UserInfo{{Id: uid, Uuid: uuid, DeviceLimit: 0}}, map[int]int{uid: 0})
+	l := AddLimiter("v2ray", tag, []panel.UserInfo{{Id: uid, Uuid: uuid, DeviceLimit: 0}}, map[int]int{uid: 0}, 0, 0)
 	tu := format.UserTag(tag, uuid)
 	var wg sync.WaitGroup
 	for i := 0; i < 64; i++ {
@@ -40,7 +40,7 @@ func TestCheckLimitConcurrent(t *testing.T) {
 func TestCheckLimitDevice(t *testing.T) {
 	Init()
 	const tag, uuid, uid = "t", "u1", 100
-	l := AddLimiter("v2ray", tag, []panel.UserInfo{{Id: uid, Uuid: uuid, DeviceLimit: 2}}, map[int]int{uid: 1})
+	l := AddLimiter("v2ray", tag, []panel.UserInfo{{Id: uid, Uuid: uuid, DeviceLimit: 2}}, map[int]int{uid: 1}, 0, 0)
 	tu := format.UserTag(tag, uuid)
 
 	if _, rej := l.CheckLimit(tu, "1.1.1.1", true); rej {
@@ -69,7 +69,7 @@ func TestCheckLimitDevice(t *testing.T) {
 func TestCheckLimitReturningDevice(t *testing.T) {
 	Init()
 	const tag, uuid, uid = "t2", "u2", 200
-	l := AddLimiter("v2ray", tag, []panel.UserInfo{{Id: uid, Uuid: uuid, DeviceLimit: 1}}, map[int]int{uid: 0})
+	l := AddLimiter("v2ray", tag, []panel.UserInfo{{Id: uid, Uuid: uuid, DeviceLimit: 1}}, map[int]int{uid: 0}, 0, 0)
 	tu := format.UserTag(tag, uuid)
 
 	if _, rej := l.CheckLimit(tu, "1.1.1.1", true); rej {
@@ -91,7 +91,7 @@ func TestCheckLimitReturningDevice(t *testing.T) {
 func TestCheckLimitUnlimited(t *testing.T) {
 	Init()
 	const tag, uuid, uid = "t3", "u3", 300
-	l := AddLimiter("v2ray", tag, []panel.UserInfo{{Id: uid, Uuid: uuid, DeviceLimit: 0}}, map[int]int{uid: 999})
+	l := AddLimiter("v2ray", tag, []panel.UserInfo{{Id: uid, Uuid: uuid, DeviceLimit: 0}}, map[int]int{uid: 999}, 0, 0)
 	tu := format.UserTag(tag, uuid)
 	for _, ip := range []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"} {
 		if _, rej := l.CheckLimit(tu, ip, true); rej {
@@ -104,7 +104,7 @@ func TestCheckLimitUnlimited(t *testing.T) {
 // rejected.
 func TestCheckLimitUnknownUser(t *testing.T) {
 	Init()
-	l := AddLimiter("v2ray", "t4", nil, nil)
+	l := AddLimiter("v2ray", "t4", nil, nil, 0, 0)
 	if _, rej := l.CheckLimit(format.UserTag("t4", "ghost"), "1.1.1.1", true); !rej {
 		t.Fatal("unknown user must be rejected")
 	}

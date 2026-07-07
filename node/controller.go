@@ -74,9 +74,12 @@ func (c *Controller) Start(x *core.V2Core) error {
 	}
 	c.tag = node.Tag
 
-	// add limiter
-	l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap)
+	// add limiter (node-level SpeedLimit + local DeviceLimit fallback)
+	l := limiter.AddLimiter(c.info.Type, c.tag, c.userList, c.aliveMap, c.conf.SpeedLimit, c.conf.DeviceLimit)
 	c.limiter = l
+	// Apply local cert override: domain stays from the panel (server_name);
+	// only the issuance method + secrets come from config.
+	c.applyCertOverride()
 	if node.Security == panel.Tls {
 		err = c.requestCert()
 		if err != nil {
@@ -102,6 +105,36 @@ func (c *Controller) Start(x *core.V2Core) error {
 	c.info = node
 	c.startTasks(node)
 	return nil
+}
+
+// applyCertOverride overlays the local cert config onto the panel-provided
+// CertInfo. The certificate DOMAIN is deliberately left as the panel's
+// server_name; only CertMode/Provider/Email/DNSEnv/CertFile/KeyFile are
+// overridden so DNS API secrets never need to live in the panel.
+func (c *Controller) applyCertOverride() {
+	cc := c.conf.EffectiveCert(c.global)
+	if cc == nil || c.info == nil || c.info.Common == nil || c.info.Common.CertInfo == nil {
+		return
+	}
+	ci := c.info.Common.CertInfo
+	if cc.CertMode != "" {
+		ci.CertMode = cc.CertMode
+	}
+	if cc.Provider != "" {
+		ci.Provider = cc.Provider
+	}
+	if cc.Email != "" {
+		ci.Email = cc.Email
+	}
+	if len(cc.DNSEnv) > 0 {
+		ci.DNSEnv = cc.DNSEnv
+	}
+	if cc.CertFile != "" {
+		ci.CertFile = cc.CertFile
+	}
+	if cc.KeyFile != "" {
+		ci.KeyFile = cc.KeyFile
+	}
 }
 
 // Close implement the Close() function of the service interface

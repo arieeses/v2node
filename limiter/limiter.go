@@ -20,7 +20,8 @@ func Init() {
 
 type Limiter struct {
 	Nodetype      string         // Node type, e.g. "v2ray", "trojan", "shadowsocks"
-	SpeedLimit    int            // Node speed limit in Mbps
+	SpeedLimit    int            // Node speed limit in Mbps (0 = none)
+	DeviceLimit   int            // Local device-count fallback when panel sends none
 	UserOnlineIP  *sync.Map      // Key: TagUUID, value: {Key: Ip, value: Uid}
 	OldUserOnline *sync.Map      // Key: Ip, value: Uid
 	UUIDtoUID     map[string]int // Key: UUID, value: Uid
@@ -38,9 +39,11 @@ type UserLimitInfo struct {
 	OverLimit         bool
 }
 
-func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList map[int]int) *Limiter {
+func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList map[int]int, speedLimit, deviceLimit int) *Limiter {
 	l := &Limiter{
 		Nodetype:      nodetype,
+		SpeedLimit:    speedLimit,
+		DeviceLimit:   deviceLimit,
 		UserOnlineIP:  new(sync.Map),
 		UserLimitInfo: new(sync.Map),
 		SpeedLimiter:  new(sync.Map),
@@ -60,6 +63,8 @@ func AddLimiter(nodetype string, tag string, users []panel.UserInfo, aliveList m
 		}
 		if users[i].DeviceLimit != 0 {
 			userLimit.DeviceLimit = users[i].DeviceLimit
+		} else {
+			userLimit.DeviceLimit = deviceLimit // local fallback when panel sends none
 		}
 		userLimit.OverLimit = false
 		l.UserLimitInfo.Store(format.UserTag(tag, users[i].Uuid), userLimit)
@@ -116,7 +121,11 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 		if v, ok := l.UserLimitInfo.Load(format.UserTag(tag, modified[i].Uuid)); ok {
 			u := v.(*UserLimitInfo)
 			u.SpeedLimit = modified[i].SpeedLimit
-			u.DeviceLimit = modified[i].DeviceLimit
+			if modified[i].DeviceLimit != 0 {
+				u.DeviceLimit = modified[i].DeviceLimit
+			} else {
+				u.DeviceLimit = l.DeviceLimit
+			}
 			l.UserLimitInfo.Store(format.UserTag(tag, modified[i].Uuid), u)
 		}
 		limit := int64(determineSpeedLimit(l.SpeedLimit, modified[i].SpeedLimit)) * 1000000 / 8
@@ -142,6 +151,8 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 		}
 		if added[i].DeviceLimit != 0 {
 			userLimit.DeviceLimit = added[i].DeviceLimit
+		} else {
+			userLimit.DeviceLimit = l.DeviceLimit
 		}
 		userLimit.OverLimit = false
 		l.UserLimitInfo.Store(format.UserTag(tag, added[i].Uuid), userLimit)
