@@ -18,6 +18,7 @@ type Client struct {
 	APIHost  string
 	Token    string
 	NodeId   int
+	NodeType string // empty => unified v2node node; else XrayR-style protocol
 	nodeEtag string
 	userEtag string
 	UserList *UserListBody
@@ -47,9 +48,16 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		}
 	})
 	client.SetBaseURL(c.APIHost)
+	// node_type: a configured NodeType (vmess/vless/trojan/shadowsocks/tuic/
+	// hysteria/anytls) makes this an XrayR-style node that talks the per-protocol
+	// UniProxy panel API; empty means the unified v2node node.
+	nodeType := "v2node"
+	if c.NodeType != "" {
+		nodeType = c.NodeType
+	}
 	// set params
 	client.SetQueryParams(map[string]string{
-		"node_type": "v2node",
+		"node_type": nodeType,
 		"node_id":   strconv.Itoa(c.NodeID),
 		"token":     c.Key,
 	})
@@ -58,6 +66,7 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		Token:    c.Key,
 		APIHost:  c.APIHost,
 		NodeId:   c.NodeID,
+		NodeType: c.NodeType,
 		UserList: &UserListBody{},
 		AliveMap: &AliveMap{},
 	}, nil

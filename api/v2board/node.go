@@ -129,32 +129,31 @@ type EncSettings struct {
 // Always fetches full config (no ETag/304) to ensure the panel
 // registers a heartbeat on every call. Change detection is handled
 // by nodeNeedsRebuild() in the caller.
-func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
+func (c *Client) GetNodeInfo(ctx context.Context) (*NodeInfo, error) {
+	if c.NodeType != "" {
+		return c.getNodeInfoUniProxy(ctx)
+	}
+	return c.getNodeInfoV2(ctx)
+}
+
+// getNodeInfoV2 fetches the unified v2node config (/api/v2/server/config).
+func (c *Client) getNodeInfoV2(ctx context.Context) (node *NodeInfo, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	const path = "/api/v2/server/config"
-	r, err := c.client.
-		R().
-		SetContext(ctx).
-		ForceContentType("application/json").
-		Get(path)
+	r, err := c.client.R().SetContext(ctx).ForceContentType("application/json").Get(path)
 	if err != nil {
 		return nil, err
 	}
 	if r == nil {
 		return nil, fmt.Errorf("received nil response")
 	}
-
 	if r.RawBody() != nil {
 		defer r.RawBody().Close()
 	}
-	node = &NodeInfo{
-		Id: c.NodeId,
-	}
-	// parse protocol params
+	node = &NodeInfo{Id: c.NodeId}
 	cm := &CommonNode{}
-	err = json.Unmarshal(r.Body(), cm)
-	if err != nil {
+	if err = json.Unmarshal(r.Body(), cm); err != nil {
 		return nil, fmt.Errorf("decode node params error: %s", err)
 	}
 	switch cm.Protocol {
@@ -167,14 +166,115 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 	default:
 		return nil, fmt.Errorf("unsupport protocol: %s", cm.Protocol)
 	}
+	c.finalizeNode(node, cm)
+	return node, nil
+}
+
+// getNodeInfoUniProxy fetches an XrayR-style per-protocol config
+// (/api/v1/server/UniProxy/config) for a node whose NodeType is set. The
+// protocol comes from NodeType (the response has no top-level protocol field).
+func (c *Client) getNodeInfoUniProxy(ctx context.Context) (*NodeInfo, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	const path = "/api/v1/server/UniProxy/config"
+	r, err := c.client.R().SetContext(ctx).ForceContentType("application/json").Get(path)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, fmt.Errorf("received nil response")
+	}
+	if r.RawBody() != nil {
+		defer r.RawBody().Close()
+	}
+	proto := normalizeNodeType(c.NodeType)
+	cm, err := parseUniProxyConfig(r.Body(), proto)
+	if err != nil {
+		return nil, err
+	}
+	node := &NodeInfo{Id: c.NodeId, Type: proto}
+	if proto == "shadowsocks" {
+		node.Security = 0
+	} else {
+		node.Security = cm.Tls
+	}
+	c.finalizeNode(node, cm)
+	return node, nil
+}
+
+// parseUniProxyConfig unmarshals a UniProxy per-protocol config body into a
+// CommonNode, handling the per-protocol field-name quirks (proto must already
+// be normalized).
+func parseUniProxyConfig(body []byte, proto string) (*CommonNode, error) {
+	cm := &CommonNode{}
+	if err := json.Unmarshal(body, cm); err != nil {
+		return nil, fmt.Errorf("decode uniproxy node params error: %s", err)
+	}
+	cm.Protocol = proto
+	switch proto {
+	case "vmess":
+		// vmess uses "networkSettings" (camelCase) not "network_settings".
+		if len(cm.NetworkSettings) == 0 {
+			var alt struct {
+				NS json.RawMessage `json:"networkSettings"`
+			}
+			_ = json.Unmarshal(body, &alt)
+			cm.NetworkSettings = alt.NS
+		}
+	case "hysteria2":
+		// hysteria uses "obfs-password" (hyphen).
+		if cm.ObfsPassword == "" {
+			var alt struct {
+				OP string `json:"obfs-password"`
+			}
+			_ = json.Unmarshal(body, &alt)
+			cm.ObfsPassword = alt.OP
+		}
+	case "shadowsocks":
+		// SS HTTP obfs carries path/host under "obfs_settings"; map it into
+		// NetworkSettings the way buildShadowsocks expects.
+		if len(cm.NetworkSettings) == 0 {
+			var alt struct {
+				Obfs         string `json:"obfs"`
+				ObfsSettings struct {
+					Path string `json:"path"`
+					Host string `json:"host"`
+				} `json:"obfs_settings"`
+			}
+			_ = json.Unmarshal(body, &alt)
+			if alt.Obfs == "http" && (alt.ObfsSettings.Path != "" || alt.ObfsSettings.Host != "") {
+				ns, _ := json.Marshal(map[string]string{"path": alt.ObfsSettings.Path, "Host": alt.ObfsSettings.Host})
+				cm.NetworkSettings = ns
+			}
+		}
+	}
+	return cm, nil
+}
+
+// normalizeNodeType maps configured NodeType values to v2node's internal
+// protocol names.
+func normalizeNodeType(t string) string {
+	switch t {
+	case "v2ray":
+		return "vmess"
+	case "hysteria", "hysteria2":
+		return "hysteria2"
+	default:
+		return t
+	}
+}
+
+// finalizeNode fills the shared post-parse fields (tag, cert, intervals) and
+// attaches cm. node.Type/Security must already be set.
+func (c *Client) finalizeNode(node *NodeInfo, cm *CommonNode) {
 	node.Tag = fmt.Sprintf("[%s]-%s:%d", c.APIHost, node.Type, node.Id)
 	cf := cm.TlsSettings.CertFile
 	kf := cm.TlsSettings.KeyFile
 	if cf == "" {
-		cf = filepath.Join("/etc/v2node/", cm.Protocol+strconv.Itoa(c.NodeId)+".cer")
+		cf = filepath.Join("/etc/v2node/", node.Type+strconv.Itoa(c.NodeId)+".cer")
 	}
 	if kf == "" {
-		kf = filepath.Join("/etc/v2node/", cm.Protocol+strconv.Itoa(c.NodeId)+".key")
+		kf = filepath.Join("/etc/v2node/", node.Type+strconv.Itoa(c.NodeId)+".key")
 	}
 	cm.CertInfo = &CertInfo{
 		CertMode:         cm.TlsSettings.CertMode,
@@ -187,16 +287,13 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 		RejectUnknownSni: cm.TlsSettings.RejectUnknownSni == "1",
 	}
 	if cm.CertInfo.CertMode == "dns" && cm.TlsSettings.DNSEnv != "" {
-		envs := strings.Split(cm.TlsSettings.DNSEnv, ",")
-		for _, env := range envs {
+		for _, env := range strings.Split(cm.TlsSettings.DNSEnv, ",") {
 			kv := strings.SplitN(env, "=", 2)
 			if len(kv) == 2 {
 				cm.CertInfo.DNSEnv[kv[0]] = kv[1]
 			}
 		}
 	}
-
-	// set interval
 	if cm.BaseConfig != nil {
 		node.PushInterval = intervalToTime(cm.BaseConfig.PushInterval)
 		node.PullInterval = intervalToTime(cm.BaseConfig.PullInterval)
@@ -204,10 +301,7 @@ func (c *Client) GetNodeInfo(ctx context.Context) (node *NodeInfo, err error) {
 		node.PushInterval = 60 * time.Second
 		node.PullInterval = 60 * time.Second
 	}
-
 	node.Common = cm
-
-	return node, nil
 }
 
 func intervalToTime(i interface{}) time.Duration {
