@@ -85,7 +85,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	//init limiter
 	limiter.Init()
 	//get node info
-	nodes, err := node.New(c.NodeConfigs)
+	nodes, err := node.New(c.NodeConfigs, c.Global)
 	if err != nil {
 		log.WithField("err", err).Error("Get node info failed")
 		return
@@ -154,7 +154,7 @@ func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	newNodes, err := node.New(newConf.NodeConfigs)
+	newNodes, err := node.New(newConf.NodeConfigs, newConf.Global)
 	if err != nil {
 		return fmt.Errorf("fetch node info: %w (old nodes still running)", err)
 	}

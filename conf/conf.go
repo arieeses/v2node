@@ -12,6 +12,7 @@ const DefaultNodeTimeout = 15
 
 type Conf struct {
 	LogConfig   LogConfig    `mapstructure:"Log"`
+	Global      GlobalConfig `mapstructure:"Global"`
 	NodeConfigs []NodeConfig `mapstructure:"Nodes"`
 	PprofPort   int          `mapstructure:"PprofPort"`
 }
@@ -22,17 +23,83 @@ type LogConfig struct {
 	Access string `mapstructure:"Access"`
 }
 
+// GlobalConfig holds defaults inherited by every node. A node may override any
+// of these in its own entry; node values win over global.
+type GlobalConfig struct {
+	PullInterval    int                   `mapstructure:"PullInterval"`
+	DisableSniffing bool                  `mapstructure:"DisableSniffing"`
+	AutoSpeedLimit  *AutoSpeedLimitConfig `mapstructure:"AutoSpeedLimit"`
+	Cert            *CertConfig           `mapstructure:"Cert"`
+	Policy          *PolicyConfig         `mapstructure:"Policy"`
+
+	// Rule sources. "remote" (default) = build DNS/routing from the panel's
+	// routes; "local" = load the corresponding local xray json file below.
+	RouteMode string `mapstructure:"RouteMode"`
+	DnsMode   string `mapstructure:"DnsMode"`
+
+	RouteConfigPath    string `mapstructure:"RouteConfigPath"`
+	DnsConfigPath      string `mapstructure:"DnsConfigPath"`
+	InboundConfigPath  string `mapstructure:"InboundConfigPath"`
+	OutboundConfigPath string `mapstructure:"OutboundConfigPath"`
+}
+
+// AutoSpeedLimitConfig mirrors XrayR's auto (dynamic) speed limit: a user whose
+// per-cycle speed exceeds Limit (mbps) WarnTimes in a row is throttled to
+// LimitSpeed (mbps) for LimitDuration minutes.
+type AutoSpeedLimitConfig struct {
+	Enable        *bool `mapstructure:"Enable"`
+	Limit         int   `mapstructure:"Limit"`
+	WarnTimes     int   `mapstructure:"WarnTimes"`
+	LimitSpeed    int   `mapstructure:"LimitSpeed"`
+	LimitDuration int   `mapstructure:"LimitDuration"`
+}
+
+// CertConfig is the LOCAL certificate-issuance config. The certificate DOMAIN
+// always comes from the panel (node server_name); only the issuance method and
+// secrets live here so DNS API keys never need to be stored in the panel.
+type CertConfig struct {
+	CertMode string            `mapstructure:"CertMode"`
+	Provider string            `mapstructure:"Provider"`
+	Email    string            `mapstructure:"Email"`
+	DNSEnv   map[string]string `mapstructure:"DNSEnv"`
+	CertFile string            `mapstructure:"CertFile"`
+	KeyFile  string            `mapstructure:"KeyFile"`
+}
+
+// PolicyConfig exposes the xray connection policy knobs (pointers so "unset"
+// falls back to the built-in default).
+type PolicyConfig struct {
+	Handshake      *int `mapstructure:"Handshake"`
+	ConnIdle       *int `mapstructure:"ConnIdle"`
+	BufferSize     *int `mapstructure:"BufferSize"`
+	GrpcBufferSize *int `mapstructure:"GrpcBufferSize"`
+}
+
 type NodeConfig struct {
 	APIHost    string `mapstructure:"ApiHost"`
 	NodeID     int    `mapstructure:"NodeID"`
 	Key        string `mapstructure:"ApiKey"`
 	Timeout    int    `mapstructure:"Timeout"`
 	RetryCount *int   `mapstructure:"RetryCount"`
-	// DisableSniffing turns off domain sniffing for this node. Sniffing is
-	// only needed for domain-based routing; disabling it on nodes that don't
-	// route by domain removes the per-connection sniff buffer + cachedReader
-	// wrapping and the sniffing work, cutting CPU and memory.
-	DisableSniffing bool `mapstructure:"DisableSniffing"`
+
+	// NodeType, when set (vmess/vless/trojan/shadowsocks/tuic/hysteria/anytls),
+	// makes the node talk the per-protocol UniProxy panel API (like XrayR)
+	// instead of the unified v2node /api/v2/server/config. Empty = v2node node.
+	NodeType string `mapstructure:"NodeType"`
+
+	// DisableSniffing overrides Global.DisableSniffing when set.
+	DisableSniffing *bool `mapstructure:"DisableSniffing"`
+
+	// SpeedLimit is a node-wide local speed cap in Mbps (0 = no local cap).
+	SpeedLimit int `mapstructure:"SpeedLimit"`
+	// DeviceLimit is a local device-count fallback used when the panel does
+	// not send a per-user device_limit (0 = unlimited).
+	DeviceLimit int `mapstructure:"DeviceLimit"`
+	// PullInterval overrides Global.PullInterval / panel interval when > 0.
+	PullInterval int `mapstructure:"PullInterval"`
+
+	AutoSpeedLimit *AutoSpeedLimitConfig `mapstructure:"AutoSpeedLimit"`
+	Cert           *CertConfig           `mapstructure:"Cert"`
 }
 
 func New() *Conf {
@@ -65,6 +132,83 @@ func (p *Conf) LoadFromPath(filePath string) error {
 		}
 	}
 	return nil
+}
+
+// ---- effective-value resolvers (node overrides global) ----
+
+// SniffDisabled reports whether sniffing is off for this node.
+func (n *NodeConfig) SniffDisabled(g GlobalConfig) bool {
+	if n.DisableSniffing != nil {
+		return *n.DisableSniffing
+	}
+	return g.DisableSniffing
+}
+
+// EffectiveCert returns the cert config for this node (node overrides global,
+// field by field), or nil if neither is set.
+func (n *NodeConfig) EffectiveCert(g GlobalConfig) *CertConfig {
+	if n.Cert == nil {
+		return g.Cert
+	}
+	if g.Cert == nil {
+		return n.Cert
+	}
+	out := *g.Cert // copy global as the base
+	c := n.Cert
+	if c.CertMode != "" {
+		out.CertMode = c.CertMode
+	}
+	if c.Provider != "" {
+		out.Provider = c.Provider
+	}
+	if c.Email != "" {
+		out.Email = c.Email
+	}
+	if c.DNSEnv != nil {
+		out.DNSEnv = c.DNSEnv
+	}
+	if c.CertFile != "" {
+		out.CertFile = c.CertFile
+	}
+	if c.KeyFile != "" {
+		out.KeyFile = c.KeyFile
+	}
+	return &out
+}
+
+// EffectiveAutoSpeedLimit returns the resolved auto-speed-limit for this node,
+// or nil if disabled/unset. Node fields override global fields.
+func (n *NodeConfig) EffectiveAutoSpeedLimit(g GlobalConfig) *AutoSpeedLimitConfig {
+	base := g.AutoSpeedLimit
+	if base == nil && n.AutoSpeedLimit == nil {
+		return nil
+	}
+	var out AutoSpeedLimitConfig
+	if base != nil {
+		out = *base
+	}
+	if o := n.AutoSpeedLimit; o != nil {
+		if o.Enable != nil {
+			out.Enable = o.Enable
+		}
+		if o.Limit != 0 {
+			out.Limit = o.Limit
+		}
+		if o.WarnTimes != 0 {
+			out.WarnTimes = o.WarnTimes
+		}
+		if o.LimitSpeed != 0 {
+			out.LimitSpeed = o.LimitSpeed
+		}
+		if o.LimitDuration != 0 {
+			out.LimitDuration = o.LimitDuration
+		}
+	}
+	// Enabled only when explicitly on and a trigger threshold is set.
+	if out.Enable == nil || !*out.Enable || out.Limit <= 0 {
+		return nil
+	}
+	return &out
 }
 
 func intPtr(v int) *int {

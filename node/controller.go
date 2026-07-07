@@ -21,6 +21,7 @@ type Controller struct {
 	userList                []panel.UserInfo
 	aliveMap                map[int]int
 	conf                    *conf.NodeConfig
+	global                  conf.GlobalConfig
 	info                    *panel.NodeInfo
 	nodeInfoMonitorPeriodic *task.Task
 	userReportPeriodic      *task.Task
@@ -29,11 +30,12 @@ type Controller struct {
 }
 
 // NewController return a Node controller with default parameters.
-func NewController(api *panel.Client, conf *conf.NodeConfig, info *panel.NodeInfo) *Controller {
+func NewController(api *panel.Client, conf *conf.NodeConfig, info *panel.NodeInfo, global conf.GlobalConfig) *Controller {
 	controller := &Controller{
 		apiClient: api,
 		info:      info,
 		conf:      conf,
+		global:    global,
 	}
 	return controller
 }
@@ -82,7 +84,7 @@ func (c *Controller) Start(x *core.V2Core) error {
 		}
 	}
 	// Add new tag
-	err = c.server.AddNode(c.tag, node, c.conf.DisableSniffing)
+	err = c.server.AddNode(c.tag, node, c.conf.SniffDisabled(c.global))
 	if err != nil {
 		return fmt.Errorf("add new node error: %s", err)
 	}

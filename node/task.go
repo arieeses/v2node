@@ -117,7 +117,7 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		// Wait for port to be released
 		time.Sleep(time.Second)
 		// Add new inbound (do NOT update c.info yet)
-		if err = c.server.AddNode(c.tag, newN, c.conf.DisableSniffing); err != nil {
+		if err = c.server.AddNode(c.tag, newN, c.conf.SniffDisabled(c.global)); err != nil {
 			log.WithFields(log.Fields{
 				"tag": c.tag,
 				"err": err,
@@ -250,7 +250,7 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 				}).Warn("Port health check failed, rebuilding inbound")
 				_ = c.server.DelNode(c.tag)
 				time.Sleep(time.Second)
-				if rebuildErr := c.server.AddNode(c.tag, c.info, c.conf.DisableSniffing); rebuildErr != nil {
+				if rebuildErr := c.server.AddNode(c.tag, c.info, c.conf.SniffDisabled(c.global)); rebuildErr != nil {
 					log.WithFields(log.Fields{
 						"tag": c.tag,
 						"err": rebuildErr,

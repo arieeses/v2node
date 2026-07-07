@@ -20,7 +20,7 @@ type Node struct {
 // New fetches node info from each panel concurrently.
 // If one panel is unreachable, that node is skipped.
 // Only returns an error if ALL nodes fail.
-func New(nodes []conf.NodeConfig) (*Node, error) {
+func New(nodes []conf.NodeConfig, global conf.GlobalConfig) (*Node, error) {
 	type result struct {
 		controller *Controller
 		info       *panel.NodeInfo
@@ -54,7 +54,7 @@ func New(nodes []conf.NodeConfig) (*Node, error) {
 				return
 			}
 			results <- result{
-				controller: NewController(p, &nodes[idx], info),
+				controller: NewController(p, &nodes[idx], info, global),
 				info:       info,
 			}
 		}(i)
