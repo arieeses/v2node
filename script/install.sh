@@ -268,7 +268,7 @@ install_v2node() {
     # OOM/stability test build — pinned to the arieeses prerelease (batch-1).
     # (Original version selection replaced so this installer always fetches the
     # batch-1 test binary.)
-    echo -e "${green}安装 batch-1 测试版 (v0.4.6.11-oom-test)...${plain}"
+    echo -e "${green}安装 batch-2 测试版 (v0.4.6.11-b2-test)...${plain}"
     if [[ "$arch" == "arm64-v8a" ]]; then
         echo -e "${red}该测试版目前只提供 amd64，arm64 暂未构建${plain}"
         exit 1
