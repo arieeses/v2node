@@ -27,6 +27,9 @@ type Controller struct {
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
 	reconcileCounter        int
+	// auto-speed-limit state
+	reportInterval time.Duration
+	speedWarn      map[int]int // UID -> consecutive over-limit cycles
 }
 
 // NewController return a Node controller with default parameters.
@@ -36,6 +39,7 @@ func NewController(api *panel.Client, conf *conf.NodeConfig, info *panel.NodeInf
 		info:      info,
 		conf:      conf,
 		global:    global,
+		speedWarn: make(map[int]int),
 	}
 	return controller
 }

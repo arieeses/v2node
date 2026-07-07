@@ -160,6 +160,20 @@ func (l *Limiter) UpdateUser(tag string, added []panel.UserInfo, deleted []panel
 	}
 }
 
+// SetDynamicSpeedLimitByUID throttles a user (by UID) to limit Mbps until
+// expire. Used by the auto-speed-limit monitor, which only knows UIDs.
+func (l *Limiter) SetDynamicSpeedLimitByUID(uid int, limit int, expire time.Time) {
+	l.UserLimitInfo.Range(func(_, v interface{}) bool {
+		info := v.(*UserLimitInfo)
+		if info.UID == uid {
+			info.DynamicSpeedLimit = limit
+			info.ExpireTime = expire.Unix()
+			return false
+		}
+		return true
+	})
+}
+
 func (l *Limiter) UpdateDynamicSpeedLimit(tag, uuid string, limit int, expire time.Time) error {
 	if v, ok := l.UserLimitInfo.Load(format.UserTag(tag, uuid)); ok {
 		info := v.(*UserLimitInfo)

@@ -2,9 +2,11 @@ package node
 
 import (
 	"context"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
+	"github.com/wyx2685/v2node/conf"
 )
 
 func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
@@ -15,6 +17,10 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 		devicemin = c.info.Common.BaseConfig.DeviceOnlineMinTraffic
 	}
 	userTraffic, _ := c.server.GetUserTrafficSlice(c.tag, reportmin)
+	// Auto speed limit: throttle users whose per-cycle speed exceeds the limit.
+	if asl := c.conf.EffectiveAutoSpeedLimit(c.global); asl != nil {
+		c.applyAutoSpeedLimit(userTraffic, asl)
+	}
 	if len(userTraffic) > 0 {
 		err = c.apiClient.ReportUserTraffic(ctx, userTraffic)
 		if err != nil {
@@ -72,6 +78,35 @@ func (c *Controller) reportUserTrafficTask(ctx context.Context) (err error) {
 	}
 
 	return nil
+}
+
+// applyAutoSpeedLimit throttles users whose average speed this cycle exceeds
+// asl.Limit (Mbps) for WarnTimes consecutive cycles, down to LimitSpeed (Mbps)
+// for LimitDuration minutes. Runs on the single report-task goroutine, so the
+// speedWarn map needs no locking.
+func (c *Controller) applyAutoSpeedLimit(traffic []panel.UserTraffic, asl *conf.AutoSpeedLimitConfig) {
+	if c.limiter == nil {
+		return
+	}
+	sec := c.reportInterval.Seconds()
+	if sec <= 0 {
+		sec = 60
+	}
+	for _, t := range traffic {
+		mbps := float64(t.Upload+t.Download) * 8 / sec / 1e6
+		if mbps > float64(asl.Limit) {
+			c.speedWarn[t.UID]++
+			if c.speedWarn[t.UID] >= asl.WarnTimes {
+				c.limiter.SetDynamicSpeedLimitByUID(t.UID, asl.LimitSpeed,
+					time.Now().Add(time.Duration(asl.LimitDuration)*time.Minute))
+				c.speedWarn[t.UID] = 0
+				log.WithFields(log.Fields{"tag": c.tag, "uid": t.UID, "mbps": int(mbps)}).
+					Info("Auto speed limit triggered")
+			}
+		} else {
+			delete(c.speedWarn, t.UID) // reset — warns must be consecutive
+		}
+	}
 }
 
 func compareUserList(old, new []panel.UserInfo) (deleted, added, modified []panel.UserInfo) {

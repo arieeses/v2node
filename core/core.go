@@ -107,14 +107,28 @@ func getCore(c *conf.Conf, infos []*panel.NodeInfo) *core.Instance {
 	// by GetUserTrafficSlice). xray's built-in per-user stats were never read
 	// (d.stats is assigned but unused), so enabling them only doubled the
 	// per-packet counting work and kept a redundant counter per user in RAM.
+	// Lean defaults; overridable via Global.Policy. (GrpcBufferSize lives in
+	// the xray-core transport, not here.)
+	handshake, connIdle, bufferSize := 10, 60, 4
+	if p := c.Global.Policy; p != nil {
+		if p.Handshake != nil && *p.Handshake > 0 {
+			handshake = *p.Handshake
+		}
+		if p.ConnIdle != nil && *p.ConnIdle > 0 {
+			connIdle = *p.ConnIdle
+		}
+		if p.BufferSize != nil && *p.BufferSize > 0 {
+			bufferSize = *p.BufferSize
+		}
+	}
 	levelPolicyConfig := &coreConf.Policy{
 		StatsUserUplink:   false,
 		StatsUserDownlink: false,
-		Handshake:         proto.Uint32(10),
-		ConnectionIdle:    proto.Uint32(60),
+		Handshake:         proto.Uint32(uint32(handshake)),
+		ConnectionIdle:    proto.Uint32(uint32(connIdle)),
 		UplinkOnly:        proto.Uint32(2),
 		DownlinkOnly:      proto.Uint32(4),
-		BufferSize:        proto.Int32(4),
+		BufferSize:        proto.Int32(int32(bufferSize)),
 	}
 	corePolicyConfig := &coreConf.PolicyConfig{}
 	corePolicyConfig.Levels = map[uint32]*coreConf.Policy{0: levelPolicyConfig}

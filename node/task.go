@@ -19,16 +19,29 @@ import (
 const userReconcileEvery = 5
 
 func (c *Controller) startTasks(node *panel.NodeInfo) {
+	// Sync cadence: config PullInterval (node > global) overrides the panel's
+	// push/pull intervals when set (>0). Larger interval = less panel polling
+	// and less per-cycle user-list decode churn.
+	pull, push := node.PullInterval, node.PushInterval
+	sec := c.conf.PullInterval
+	if sec <= 0 {
+		sec = c.global.PullInterval
+	}
+	if sec > 0 {
+		pull = time.Duration(sec) * time.Second
+		push = pull
+	}
+	c.reportInterval = push // used by the auto-speed-limit monitor
 	// fetch node info task
 	c.nodeInfoMonitorPeriodic = &task.Task{
 		Name:     "nodeInfoMonitor[" + c.tag + "]",
-		Interval: node.PullInterval,
+		Interval: pull,
 		Execute:  c.nodeInfoMonitor,
 	}
 	// fetch user list task
 	c.userReportPeriodic = &task.Task{
 		Name:     "reportUserTrafficTask[" + c.tag + "]",
-		Interval: node.PushInterval,
+		Interval: push,
 		Execute:  c.reportUserTrafficTask,
 	}
 	log.WithField("tag", c.tag).Info("Start monitor node status")
