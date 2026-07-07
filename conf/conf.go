@@ -28,6 +28,11 @@ type NodeConfig struct {
 	Key        string `mapstructure:"ApiKey"`
 	Timeout    int    `mapstructure:"Timeout"`
 	RetryCount *int   `mapstructure:"RetryCount"`
+	// DisableSniffing turns off domain sniffing for this node. Sniffing is
+	// only needed for domain-based routing; disabling it on nodes that don't
+	// route by domain removes the per-connection sniff buffer + cachedReader
+	// wrapping and the sniffing work, cutting CPU and memory.
+	DisableSniffing bool `mapstructure:"DisableSniffing"`
 }
 
 func New() *Conf {

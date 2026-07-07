@@ -59,7 +59,7 @@ func (v *V2Core) addInbound(config *core.InboundHandlerConfig) error {
 }
 
 // BuildInbound build Inbound config for different protocol
-func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerConfig, error) {
+func buildInbound(nodeInfo *panel.NodeInfo, tag string, disableSniffing bool) (*core.InboundHandlerConfig, error) {
 	in := &coreConf.InboundDetourConfig{}
 	var err error
 	switch nodeInfo.Type {
@@ -119,9 +119,11 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string) (*core.InboundHandlerCon
 	// Set Listen IP address
 	ipAddress := net.ParseAddress(nodeInfo.Common.ListenIP)
 	in.ListenOn = &coreConf.Address{Address: ipAddress}
-	// Set SniffingConfig
+	// Set SniffingConfig. Enabled unless the node opts out via DisableSniffing
+	// (nodes that don't route by domain don't need it — saves the per-conn
+	// sniff buffer, the cachedReader wrapping and the sniffing CPU).
 	sniffingConfig := &coreConf.SniffingConfig{
-		Enabled:      true,
+		Enabled:      !disableSniffing,
 		DestOverride: coreConf.StringList{"http", "tls", "quic"},
 	}
 	in.SniffingConfig = sniffingConfig

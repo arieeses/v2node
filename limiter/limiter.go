@@ -188,34 +188,41 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 		return nil, true
 	}
 	if noUDPsource || l.Nodetype == "hysteria2" || l.Nodetype == "tuic" {
-		// Store online user for device limit
-		newipMap := new(sync.Map)
-		newipMap.Store(ip, uid)
 		aliveIp := l.getAliveIp(uid)
-		// If any device is online
-		if v, loaded := l.UserOnlineIP.LoadOrStore(taguuid, newipMap); loaded {
-			oldipMap := v.(*sync.Map)
-			// If this is a new ip
-			if _, loaded := oldipMap.LoadOrStore(ip, uid); !loaded {
-				if v, loaded := l.OldUserOnline.Load(ip); loaded {
-					if v.(int) == uid {
+		// Fast path: the user already has an online-IP map this cycle — reuse
+		// it with no allocation. Only allocate a new sync.Map when the user has
+		// no entry yet (first device this cycle). Previously a sync.Map was
+		// allocated on EVERY connection and discarded on the common
+		// (already-present) path — pure garbage/GC churn under load.
+		v, present := l.UserOnlineIP.Load(taguuid)
+		if !present {
+			newipMap := new(sync.Map)
+			newipMap.Store(ip, uid)
+			if actual, loaded := l.UserOnlineIP.LoadOrStore(taguuid, newipMap); loaded {
+				// Lost a race — another goroutine created the map first.
+				v, present = actual, true
+			} else {
+				// First device for this user this cycle (ip already stored).
+				if ov, ok := l.OldUserOnline.Load(ip); ok {
+					if ov.(int) == uid {
 						l.OldUserOnline.Delete(ip)
 					}
-				} else if deviceLimit > 0 {
-					if deviceLimit <= aliveIp {
-						oldipMap.Delete(ip)
-						return nil, true
-					}
+				} else if deviceLimit > 0 && deviceLimit <= aliveIp {
+					l.UserOnlineIP.Delete(taguuid)
+					return nil, true
 				}
 			}
-		} else if v, ok := l.OldUserOnline.Load(ip); ok {
-			if v.(int) == uid {
-				l.OldUserOnline.Delete(ip)
-			}
-		} else {
-			if deviceLimit > 0 {
-				if deviceLimit <= aliveIp {
-					l.UserOnlineIP.Delete(taguuid)
+		}
+		if present {
+			ipMap := v.(*sync.Map)
+			// If this is a new ip for an already-tracked user.
+			if _, loaded := ipMap.LoadOrStore(ip, uid); !loaded {
+				if ov, ok := l.OldUserOnline.Load(ip); ok {
+					if ov.(int) == uid {
+						l.OldUserOnline.Delete(ip)
+					}
+				} else if deviceLimit > 0 && deviceLimit <= aliveIp {
+					ipMap.Delete(ip)
 					return nil, true
 				}
 			}

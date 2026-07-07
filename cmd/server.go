@@ -61,6 +61,9 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		log.SetLevel(log.WarnLevel)
 	case "error":
 		log.SetLevel(log.ErrorLevel)
+	case "none":
+		// Silence everything below panic (no error/warn/info logs, minimal IO).
+		log.SetLevel(log.PanicLevel)
 	}
 	if c.LogConfig.Output != "" {
 		f, err := os.OpenFile(c.LogConfig.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -185,6 +188,8 @@ func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
 		log.SetLevel(log.WarnLevel)
 	case "error":
 		log.SetLevel(log.ErrorLevel)
+	case "none":
+		log.SetLevel(log.PanicLevel)
 	}
 	if newConf.LogConfig.Output != "" {
 		f, err := os.OpenFile(newConf.LogConfig.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)

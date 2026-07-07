@@ -109,12 +109,17 @@ func (vc *V2Core) GetUserTrafficSlice(tag string, mintraffic int) ([]panel.UserT
 			// Use atomic Swap to read and zero in one operation
 			up := traffic.UpCounter.Swap(0)
 			down := traffic.DownCounter.Swap(0)
+			// Prune orphan counters (user no longer in uidMap) regardless of
+			// how much traffic they carried. Previously this cleanup was gated
+			// behind the mintraffic threshold, so a churned-out user whose
+			// residual traffic was below the threshold never had its counter
+			// removed — the entry leaked for the life of the process.
+			uid, loaded := vc.users.uidMap.Load(email)
+			if !loaded || uid.(int) == 0 {
+				c.Delete(email)
+				return true
+			}
 			if up+down > int64(mintraffic*1000) {
-				uid, loaded := vc.users.uidMap.Load(email)
-				if !loaded || uid.(int) == 0 {
-					c.Delete(email)
-					return true
-				}
 				trafficSlice = append(trafficSlice, panel.UserTraffic{
 					UID:      uid.(int),
 					Upload:   up,
