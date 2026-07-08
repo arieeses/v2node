@@ -136,7 +136,7 @@ update() {
 
 config() {
     echo "v2node在修改配置后会自动尝试重启"
-    vi /etc/v2node/config.json
+    vi /etc/v2node/config.yml
     sleep 2
     restart
     check_status
@@ -426,22 +426,17 @@ generate_v2node_config() {
         local api_key="$3"
 
         mkdir -p /etc/v2node >/dev/null 2>&1
-        cat > /etc/v2node/config.json <<EOF
-{
-    "Log": {
-        "Level": "warning",
-        "Output": "",
-        "Access": "none"
-    },
-    "Nodes": [
-        {
-            "ApiHost": "${api_host}",
-            "NodeID": ${node_id},
-            "ApiKey": "${api_key}",
-            "Timeout": 15
-        }
-    ]
-}
+        cat > /etc/v2node/config.yml <<EOF
+Log:
+  Level: warning
+  Output: ""
+  Access: none
+
+Nodes:
+  - ApiHost: "${api_host}"
+    NodeID: ${node_id}
+    ApiKey: "${api_key}"
+    Timeout: 15
 EOF
         echo -e "${green}V2node 配置文件生成完成,正在重新启动服务${plain}"
         if [[ x"${release}" == x"alpine" ]]; then

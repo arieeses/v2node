@@ -224,22 +224,17 @@ generate_v2node_config() {
         local api_key="$3"
 
         mkdir -p /etc/v2node >/dev/null 2>&1
-        cat > /etc/v2node/config.json <<EOF
-{
-    "Log": {
-        "Level": "warning",
-        "Output": "",
-        "Access": "none"
-    },
-    "Nodes": [
-        {
-            "ApiHost": "${api_host}",
-            "NodeID": ${node_id},
-            "ApiKey": "${api_key}",
-            "Timeout": 15
-        }
-    ]
-}
+        cat > /etc/v2node/config.yml <<EOF
+Log:
+  Level: warning
+  Output: ""
+  Access: none
+
+Nodes:
+  - ApiHost: "${api_host}"
+    NodeID: ${node_id}
+    ApiKey: "${api_key}"
+    Timeout: 15
 EOF
         echo -e "${green}V2node 配置文件生成完成,正在重新启动服务${plain}"
         if [[ x"${release}" == x"alpine" ]]; then
@@ -329,7 +324,7 @@ LimitRSS=infinity
 LimitCORE=infinity
 LimitNOFILE=999999
 WorkingDirectory=/usr/local/v2node/
-ExecStart=/usr/local/v2node/v2node server
+ExecStart=/usr/local/v2node/v2node server -c /etc/v2node/config.yml
 Restart=always
 RestartSec=10
 
@@ -342,14 +337,14 @@ EOF
         echo -e "${green}v2node ${last_version}${plain} 安装完成，已设置开机自启"
     fi
 
-    if [[ ! -f /etc/v2node/config.json ]]; then
+    if [[ ! -f /etc/v2node/config.yml ]]; then
         # 如果通过 CLI 传入了完整参数，则直接生成配置并跳过交互
         if [[ -n "$API_HOST_ARG" && -n "$NODE_ID_ARG" && -n "$API_KEY_ARG" ]]; then
             generate_v2node_config "$API_HOST_ARG" "$NODE_ID_ARG" "$API_KEY_ARG"
-            echo -e "${green}已根据参数生成 /etc/v2node/config.json${plain}"
+            echo -e "${green}已根据参数生成 /etc/v2node/config.yml${plain}"
             first_install=false
         else
-            cp config.json /etc/v2node/
+            first_install=true
             first_install=true
         fi
     else
@@ -370,7 +365,7 @@ EOF
     fi
 
 
-    curl -o /usr/bin/v2node -Ls https://raw.githubusercontent.com/clavin-dev/m2node/main/script/v2node.sh
+    curl -o /usr/bin/v2node -Ls https://raw.githubusercontent.com/arieeses/v2node/oom-test/script/v2node.sh
     chmod +x /usr/bin/v2node
 
     cd $cur_dir
@@ -396,7 +391,7 @@ EOF
     curl -fsS --max-time 10 "https://api.v-50.me/counter" || true
 
     if [[ $first_install == true ]]; then
-        read -rp "检测到你为第一次安装 v2node，是否自动生成 /etc/v2node/config.json？(y/n): " if_generate
+        read -rp "检测到你为第一次安装 v2node，是否自动生成 /etc/v2node/config.yml？(y/n): " if_generate
         if [[ "$if_generate" =~ ^[Yy]$ ]]; then
             # 交互式收集参数，提供示例默认值
             read -rp "面板API地址[格式: https://example.com/]: " api_host
