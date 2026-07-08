@@ -254,13 +254,13 @@ func parseUniProxyConfig(body []byte, proto string) (*CommonNode, error) {
 // normalizeNodeType maps configured NodeType values to v2node's internal
 // protocol names.
 func normalizeNodeType(t string) string {
-	switch t {
+	switch strings.ToLower(t) {
 	case "v2ray":
 		return "vmess"
 	case "hysteria", "hysteria2":
 		return "hysteria2"
 	default:
-		return t
+		return strings.ToLower(t)
 	}
 }
 

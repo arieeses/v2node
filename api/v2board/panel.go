@@ -3,6 +3,7 @@ package panel
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -51,9 +52,11 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	// node_type: a configured NodeType (vmess/vless/trojan/shadowsocks/tuic/
 	// hysteria/anytls) makes this an XrayR-style node that talks the per-protocol
 	// UniProxy panel API; empty means the unified v2node node.
+	// Accept any case (XrayR uses ToLower); the panel matches lowercase.
+	nt := strings.ToLower(c.NodeType)
 	nodeType := "v2node"
-	if c.NodeType != "" {
-		nodeType = c.NodeType
+	if nt != "" {
+		nodeType = nt
 	}
 	// set params
 	client.SetQueryParams(map[string]string{
@@ -66,7 +69,7 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		Token:    c.Key,
 		APIHost:  c.APIHost,
 		NodeId:   c.NodeID,
-		NodeType: c.NodeType,
+		NodeType: nt,
 		UserList: &UserListBody{},
 		AliveMap: &AliveMap{},
 	}, nil

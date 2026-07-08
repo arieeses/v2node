@@ -9,6 +9,7 @@ func TestNormalizeNodeType(t *testing.T) {
 	for in, want := range map[string]string{
 		"v2ray": "vmess", "hysteria": "hysteria2", "hysteria2": "hysteria2",
 		"trojan": "trojan", "vless": "vless", "shadowsocks": "shadowsocks",
+		"Shadowsocks": "shadowsocks", "V2ray": "vmess", "TROJAN": "trojan", // case-insensitive
 	} {
 		if got := normalizeNodeType(in); got != want {
 			t.Errorf("normalizeNodeType(%q)=%q want %q", in, got, want)
