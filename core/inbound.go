@@ -116,8 +116,14 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string, disableSniffing bool) (*
 				To:   uint32(nodeInfo.Common.ServerPort),
 			}},
 	}
-	// Set Listen IP address
-	ipAddress := net.ParseAddress(nodeInfo.Common.ListenIP)
+	// Set Listen IP address. UniProxy (XrayR-style) configs don't carry a
+	// listen_ip, so default to 0.0.0.0 — an empty address makes xray's
+	// InboundDetourConfig.Build panic on an empty domain string.
+	listenIP := nodeInfo.Common.ListenIP
+	if listenIP == "" {
+		listenIP = "0.0.0.0"
+	}
+	ipAddress := net.ParseAddress(listenIP)
 	in.ListenOn = &coreConf.Address{Address: ipAddress}
 	// Set SniffingConfig. Enabled unless the node opts out via DisableSniffing
 	// (nodes that don't route by domain don't need it — saves the per-conn
