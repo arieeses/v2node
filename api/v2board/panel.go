@@ -1,7 +1,10 @@
 package panel
 
 import (
+	"context"
 	"errors"
+	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +40,12 @@ func New(c *conf.NodeConfig) (*Client, error) {
 	// methods) and backstopped by the task watchdog, so stalls fail fast and
 	// retry instead of hanging — without disabling keep-alive.
 	client.SetRetryCount(3)
+	// IP strategy for the panel API dialer. Clone Go's default transport (keeps
+	// HTTP/2 + keep-alive + default timeouts) and only swap the dial network, so
+	// a broken/slow IPv6 path to a CDN-fronted panel can't stall the handshake.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = ipStrategyDialer(c.ApiIPStrategy)
+	client.SetTransport(tr)
 	if c.Timeout > 0 {
 		client.SetTimeout(time.Duration(c.Timeout) * time.Second)
 	} else {
@@ -73,4 +82,39 @@ func New(c *conf.NodeConfig) (*Client, error) {
 		UserList: &UserListBody{},
 		AliveMap: &AliveMap{},
 	}, nil
+}
+
+// ipStrategyDialer returns a DialContext for the panel API HTTP client per the
+// configured strategy:
+//   - "ipv4": dial tcp4 only
+//   - "ipv6": dial tcp6 only
+//   - "auto"/"" (default): try IPv4 first, fall back to IPv6
+func ipStrategyDialer(strategy string) func(context.Context, string, string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	switch strings.ToLower(strategy) {
+	case "ipv4":
+		return func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if network == "tcp" {
+				network = "tcp4"
+			}
+			return d.DialContext(ctx, network, addr)
+		}
+	case "ipv6":
+		return func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if network == "tcp" {
+				network = "tcp6"
+			}
+			return d.DialContext(ctx, network, addr)
+		}
+	default: // auto: prefer IPv4, fall back to IPv6
+		return func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if network == "tcp" {
+				if conn, err := d.DialContext(ctx, "tcp4", addr); err == nil {
+					return conn, nil
+				}
+				return d.DialContext(ctx, "tcp6", addr)
+			}
+			return d.DialContext(ctx, network, addr)
+		}
+	}
 }

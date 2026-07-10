@@ -157,7 +157,11 @@ func (c *Client) getNodeInfoV2(ctx context.Context) (node *NodeInfo, err error) 
 		return nil, fmt.Errorf("decode node params error: %s", err)
 	}
 	switch cm.Protocol {
-	case "vmess", "trojan", "hysteria2", "tuic", "anytls", "vless", "shadowflow":
+	case "hysteria2", "tuic":
+		// QUIC protocols mandate TLS regardless of the panel's tls flag.
+		node.Type = cm.Protocol
+		node.Security = Tls
+	case "vmess", "trojan", "anytls", "vless", "shadowflow":
 		node.Type = cm.Protocol
 		node.Security = cm.Tls
 	case "shadowsocks":
@@ -193,9 +197,15 @@ func (c *Client) getNodeInfoUniProxy(ctx context.Context) (*NodeInfo, error) {
 		return nil, err
 	}
 	node := &NodeInfo{Id: c.NodeId, Type: proto}
-	if proto == "shadowsocks" {
+	switch proto {
+	case "shadowsocks":
 		node.Security = 0
-	} else {
+	case "hysteria2", "tuic":
+		// hysteria2/tuic (QUIC) mandate TLS at the transport layer, regardless
+		// of the panel's tls flag. Without it the inbound fails with
+		// "hysteria: tls config is nil".
+		node.Security = Tls
+	default:
 		node.Security = cm.Tls
 	}
 	c.finalizeNode(node, cm)

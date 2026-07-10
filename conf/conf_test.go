@@ -70,14 +70,26 @@ func TestResolversOverride(t *testing.T) {
 		t.Fatalf("cert override merge wrong: %+v", ec)
 	}
 
-	// AutoSpeedLimit: node disables it.
-	off := NodeConfig{AutoSpeedLimit: &AutoSpeedLimitConfig{Enable: b(false)}}
-	if off.EffectiveAutoSpeedLimit(g) != nil {
-		t.Fatal("node Enable=false must disable auto speed limit")
+	// AutoSpeedLimit — global switch is the master.
+	// Global master OFF => disabled on every node; node cannot re-enable.
+	gOff := GlobalConfig{AutoSpeedLimit: &AutoSpeedLimitConfig{Enable: b(false), Limit: 300}}
+	nodeOn := NodeConfig{AutoSpeedLimit: &AutoSpeedLimitConfig{Enable: b(true), Limit: 500}}
+	if nodeOn.EffectiveAutoSpeedLimit(gOff) != nil {
+		t.Fatal("global master off must disable auto speed limit on every node")
 	}
-	// Node inherits enabled global with its params.
-	on := NodeConfig{}
-	if a := on.EffectiveAutoSpeedLimit(g); a == nil || a.Limit != 300 || a.LimitSpeed != 70 {
-		t.Fatalf("node must inherit enabled global auto speed limit: %+v", a)
+	// Global ON + node Enable=false => use GLOBAL values.
+	off := NodeConfig{AutoSpeedLimit: &AutoSpeedLimitConfig{Enable: b(false)}}
+	if a := off.EffectiveAutoSpeedLimit(g); a == nil || a.Limit != 300 || a.LimitSpeed != 70 {
+		t.Fatalf("node Enable=false must fall back to global values: %+v", a)
+	}
+	// Global ON + node unset => use GLOBAL values.
+	bare := NodeConfig{}
+	if a := bare.EffectiveAutoSpeedLimit(g); a == nil || a.Limit != 300 {
+		t.Fatalf("node without override must inherit global auto speed limit: %+v", a)
+	}
+	// Global ON + node Enable=true => use NODE values (unset fields inherit global).
+	on := NodeConfig{AutoSpeedLimit: &AutoSpeedLimitConfig{Enable: b(true), Limit: 500}}
+	if a := on.EffectiveAutoSpeedLimit(g); a == nil || a.Limit != 500 || a.LimitSpeed != 70 {
+		t.Fatalf("node Enable=true must use node values with global fallback: %+v", a)
 	}
 }

@@ -27,6 +27,7 @@ type Controller struct {
 	userReportPeriodic      *task.Task
 	renewCertPeriodic       *task.Task
 	reconcileCounter        int
+	portFailCount           int // consecutive port-health-check failures
 	// auto-speed-limit state
 	reportInterval time.Duration
 	speedWarn      map[int]int // UID -> consecutive over-limit cycles
@@ -85,7 +86,11 @@ func (c *Controller) Start(x *core.V2Core) error {
 	// only the issuance method + secrets come from config.
 	c.applyCertOverride()
 	if node.Security == panel.Tls {
+		// Serialize issuance: ACME sets process-global DNS creds via os.Setenv,
+		// unsafe if two nodes issue concurrently. Cached certs return instantly.
+		certMu.Lock()
 		err = c.requestCert()
+		certMu.Unlock()
 		if err != nil {
 			return fmt.Errorf("request cert error: %s", err)
 		}

@@ -3,7 +3,8 @@ package node
 import (
 	"context"
 	"fmt"
-	"net"
+	"os"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -200,7 +201,14 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	// those users to sit in c.userList but never get added to xray (permanent
 	// new-user desync). Only the changed users are touched; existing users'
 	// connections are never disturbed (no full reload, no downtime).
-	if usersChanged {
+	if usersChanged && len(newU) == 0 && len(c.userList) > 0 {
+		// Panel returned 200 + an EMPTY user list (maintenance / DB glitch):
+		// do NOT delete everyone. Keep serving the current users; a genuine
+		// drop-to-zero is picked up on the next non-empty sync. c.userList and
+		// the ETag are left unchanged, so the reconcile safety net below also
+		// keeps operating on the old (non-empty) set.
+		log.WithField("tag", c.tag).Warn("Panel returned empty user list but node has active users; skipping user sync to avoid mass-kick (suspected panel maintenance)")
+	} else if usersChanged {
 		deleted, added, modified := compareUserList(c.userList, newU)
 		if len(deleted) > 0 {
 			err = c.server.DelUsers(deleted, c.tag, c.info)
@@ -247,20 +255,27 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		c.reconcileUsers(c.userList)
 	}
 
-	// Port health check: verify our listening port is still alive.
-	// Only for TCP-based protocols (skip hysteria2/tuic which use UDP).
+	// Listener presence check: confirm the kernel still has our port in its
+	// socket table (TCP LISTEN, or a bound UDP socket for hysteria2/tuic). This
+	// reads /proc/net directly instead of dialing, so it CANNOT produce false
+	// positives from transient load, dial timeouts, or a mismatched probe
+	// address — the port is either in the kernel table or it isn't. We do not
+	// test external reachability (that is the firewall's responsibility); we
+	// only detect the case where our own listener silently went away.
 	if c.info != nil && c.info.Common != nil && c.info.Common.ServerPort > 0 {
-		switch c.info.Type {
-		case "hysteria2", "tuic":
-			// UDP protocols — cannot TCP-dial, skip health check
-		default:
-			addr := fmt.Sprintf("127.0.0.1:%d", c.info.Common.ServerPort)
-			conn, dialErr := net.DialTimeout("tcp", addr, 2*time.Second)
-			if dialErr != nil {
+		udp := c.info.Type == "hysteria2" || c.info.Type == "tuic"
+		if !portBound(int(c.info.Common.ServerPort), udp) {
+			// Require two consecutive misses before the destructive rebuild, as a
+			// guard against a momentarily unreadable /proc.
+			c.portFailCount++
+			if c.portFailCount < 2 {
 				log.WithFields(log.Fields{
-					"tag":  c.tag,
-					"port": c.info.Common.ServerPort,
-				}).Warn("Port health check failed, rebuilding inbound")
+					"tag": c.tag, "port": c.info.Common.ServerPort,
+				}).Warn("Listener not found in kernel socket table once, will rebuild if it persists")
+			} else {
+				log.WithFields(log.Fields{
+					"tag": c.tag, "port": c.info.Common.ServerPort,
+				}).Warn("Listener missing from kernel socket table, rebuilding inbound")
 				_ = c.server.DelNode(c.tag)
 				time.Sleep(time.Second)
 				if rebuildErr := c.server.AddNode(c.tag, c.info, c.conf.SniffDisabled(c.global)); rebuildErr != nil {
@@ -282,13 +297,53 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 						"port": c.info.Common.ServerPort,
 					}).Info("Port rebuilt successfully")
 				}
-			} else {
-				conn.Close()
+				c.portFailCount = 0
 			}
+		} else {
+			c.portFailCount = 0
 		}
 	}
 
 	return nil
+}
+
+// portBound reports whether the kernel currently holds a socket on the given
+// local port: a TCP socket in LISTEN state, or — for UDP protocols like
+// hysteria2/tuic — any bound UDP socket. It parses /proc/net/{tcp,tcp6} (or
+// /proc/net/{udp,udp6}) rather than dialing, so the answer is exact and
+// instantaneous: no network round-trip, no timeout, no false positive from
+// load or a wrong probe address. The bind IP is intentionally ignored — we
+// match on port alone, so a node listening on ::, 0.0.0.0 or a specific IP is
+// all detected the same way.
+func portBound(port int, udp bool) bool {
+	files := []string{"/proc/net/tcp", "/proc/net/tcp6"}
+	if udp {
+		files = []string{"/proc/net/udp", "/proc/net/udp6"}
+	}
+	target := fmt.Sprintf("%04X", port) // /proc encodes the local port as uppercase hex
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 4 {
+				continue // header row or blank line
+			}
+			local := strings.Split(fields[1], ":") // local_address = "HEXIP:HEXPORT"
+			if len(local) != 2 || local[1] != target {
+				continue
+			}
+			if udp {
+				return true // a bound UDP socket on this port is enough
+			}
+			if fields[3] == "0A" { // 0x0A = TCP_LISTEN
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // reconcileUsers is the periodic drift safety net (XrayR-style targeted

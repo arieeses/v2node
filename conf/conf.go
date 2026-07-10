@@ -32,6 +32,15 @@ type GlobalConfig struct {
 	Cert            *CertConfig           `mapstructure:"Cert"`
 	Policy          *PolicyConfig         `mapstructure:"Policy"`
 
+	// ApiIPStrategy controls how the panel API HTTP client dials:
+	//   "auto" (default) => try IPv4 first, fall back to IPv6
+	//   "ipv4"           => IPv4 only (tcp4)
+	//   "ipv6"           => IPv6 only (tcp6)
+	// Use ipv4 when a node's IPv6 path to the panel is broken/slow and the
+	// default dual-stack dialer causes TLS-handshake/deadline timeouts. Nodes
+	// inherit this unless they set their own.
+	ApiIPStrategy string `mapstructure:"ApiIPStrategy"`
+
 	// Rule sources. "remote" (default) = build DNS/routing from the panel's
 	// routes; "local" = load the corresponding local xray json file below.
 	RouteMode string `mapstructure:"RouteMode"`
@@ -100,6 +109,10 @@ type NodeConfig struct {
 
 	AutoSpeedLimit *AutoSpeedLimitConfig `mapstructure:"AutoSpeedLimit"`
 	Cert           *CertConfig           `mapstructure:"Cert"`
+
+	// ApiIPStrategy overrides Global.ApiIPStrategy for this node's panel API
+	// client (auto/ipv4/ipv6). Empty = inherit global.
+	ApiIPStrategy string `mapstructure:"ApiIPStrategy"`
 }
 
 func New() *Conf {
@@ -129,6 +142,10 @@ func (p *Conf) LoadFromPath(filePath string) error {
 	for i := range p.NodeConfigs {
 		if p.NodeConfigs[i].RetryCount == nil {
 			p.NodeConfigs[i].RetryCount = intPtr(DefaultNodeRetryCount)
+		}
+		// Node inherits the global ApiIPStrategy unless it set its own.
+		if p.NodeConfigs[i].ApiIPStrategy == "" {
+			p.NodeConfigs[i].ApiIPStrategy = p.Global.ApiIPStrategy
 		}
 	}
 	return nil
@@ -176,21 +193,27 @@ func (n *NodeConfig) EffectiveCert(g GlobalConfig) *CertConfig {
 	return &out
 }
 
-// EffectiveAutoSpeedLimit returns the resolved auto-speed-limit for this node,
-// or nil if disabled/unset. Node fields override global fields.
+// EffectiveAutoSpeedLimit resolves the auto-speed-limit for this node.
+//
+// Semantics (global switch is the master):
+//   - Global AutoSpeedLimit absent, or its Enable != true  => OFF on every node
+//     (per-node settings cannot re-enable it).
+//   - Global Enable == true:
+//       * node's own Enable == true  => use the NODE's values (each unset field
+//         falls back to the global value);
+//       * node Enable false/unset    => use the GLOBAL values.
+//
+// Returns nil when disabled or no trigger threshold (Limit <= 0) is set.
 func (n *NodeConfig) EffectiveAutoSpeedLimit(g GlobalConfig) *AutoSpeedLimitConfig {
 	base := g.AutoSpeedLimit
-	if base == nil && n.AutoSpeedLimit == nil {
+	// Master switch: only the global Enable turns the feature on at all.
+	if base == nil || base.Enable == nil || !*base.Enable {
 		return nil
 	}
-	var out AutoSpeedLimitConfig
-	if base != nil {
-		out = *base
-	}
-	if o := n.AutoSpeedLimit; o != nil {
-		if o.Enable != nil {
-			out.Enable = o.Enable
-		}
+	out := *base // start from the global values
+	// A node that opts in (its own Enable == true) overrides with its values;
+	// otherwise the node just inherits the global values.
+	if o := n.AutoSpeedLimit; o != nil && o.Enable != nil && *o.Enable {
 		if o.Limit != 0 {
 			out.Limit = o.Limit
 		}
@@ -204,8 +227,7 @@ func (n *NodeConfig) EffectiveAutoSpeedLimit(g GlobalConfig) *AutoSpeedLimitConf
 			out.LimitDuration = o.LimitDuration
 		}
 	}
-	// Enabled only when explicitly on and a trigger threshold is set.
-	if out.Enable == nil || !*out.Enable || out.Limit <= 0 {
+	if out.Limit <= 0 {
 		return nil
 	}
 	return &out

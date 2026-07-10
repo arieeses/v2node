@@ -208,8 +208,14 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 		}
 		lm.AddLink(managedWriter, outboundLink.Reader)
 		inboundLink.Writer = managedWriter
-		// Enable kernel splice/zero-copy by default for maximum throughput
-		sessionInbound.CanSpliceCopy = 1
+		// Do NOT force sessionInbound.CanSpliceCopy = 1 here. Splice
+		// (CopyRawConnIfExist -> tc.ReadFrom) copies the outbound's RAW bytes
+		// straight into the client socket, bypassing the encoding buf.Writer. For
+		// encrypting inbounds (shadowsocks/vmess/trojan/plain vless) that skips
+		// the AEAD layer, so the client receives unencrypted bytes and reports
+		// "invalid password or cipher" -> every site times out. Upstream leaves
+		// this at xray's default (only XTLS-Vision opts into splice), and so do
+		// we; the rate-limit branch below still sets 3 for the same reason.
 		if w != nil {
 			// Rate limiting requires userspace data access, disable splice
 			sessionInbound.CanSpliceCopy = 3
@@ -419,8 +425,10 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 			manager: lm,
 		}
 		outbound.Writer = managedWriter
-		// Enable kernel splice/zero-copy by default for maximum throughput
-		sessionInbound.CanSpliceCopy = 1
+		// Do NOT force splice here — see the matching getLink path above. Forcing
+		// CanSpliceCopy = 1 spliced raw plaintext past the encoding buf.Writer and
+		// broke every encrypted inbound's downlink. Match upstream: leave it at
+		// xray's default and only disable it (3) for rate-limited connections.
 		if w != nil {
 			// Rate limiting requires userspace data access, disable splice
 			sessionInbound.CanSpliceCopy = 3

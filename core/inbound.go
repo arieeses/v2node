@@ -148,12 +148,20 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string, disableSniffing bool) (*
 				in.StreamSetting = &coreConf.StreamConfig{}
 			}
 			in.StreamSetting.Security = "tls"
+			// OCSP stapling only makes sense for CA-issued certs (dns/http) that
+			// carry an OCSP responder URL. Self-signed / local-file certs have
+			// none, so enabling it just floods the log with "no OCSP server
+			// specified in cert" warnings on every connection. 0 = disabled.
+			var ocsp uint64 = 0
+			if m := nodeInfo.Common.CertInfo.CertMode; m == "dns" || m == "http" {
+				ocsp = 3600
+			}
 			in.StreamSetting.TLSSettings = &coreConf.TLSConfig{
 				Certs: []*coreConf.TLSCertConfig{
 					{
 						CertFile:     nodeInfo.Common.CertInfo.CertFile,
 						KeyFile:      nodeInfo.Common.CertInfo.KeyFile,
-						OcspStapling: 3600,
+						OcspStapling: ocsp,
 					},
 				},
 				RejectUnknownSNI: nodeInfo.Common.CertInfo.RejectUnknownSni,
@@ -688,4 +696,3 @@ func buildShadowFlow(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourCo
 	}
 	return nil
 }
-

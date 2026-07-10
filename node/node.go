@@ -79,21 +79,37 @@ func New(nodes []conf.NodeConfig, global conf.GlobalConfig) (*Node, error) {
 	return n, nil
 }
 
-// Start starts each node controller independently. If one fails,
-// the rest still start normally.
+// certMu serializes per-node certificate issuance. The ACME path sets
+// process-global env vars (DNS provider creds via os.Setenv) that are not safe
+// under the concurrent Start below. Issuance is one-time (existing certs are
+// reused on restart), so serializing it costs nothing on the hot path.
+var certMu sync.Mutex
+
+// Start starts each node controller CONCURRENTLY so one slow/timing-out panel
+// does not block the rest — the fleet comes online in parallel (≈ the slowest
+// single node) instead of serially (≈ the sum of all nodes). If one fails, the
+// others still start.
 func (n *Node) Start(core *core.V2Core) error {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	var started int
 	for i := range n.controllers {
-		err := n.controllers[i].Start(core)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"tag": n.controllers[i].tag,
-				"err": err,
-			}).Error("Start node controller failed, skipping")
-			continue
-		}
-		started++
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			if err := n.controllers[idx].Start(core); err != nil {
+				log.WithFields(log.Fields{
+					"tag": n.controllers[idx].tag,
+					"err": err,
+				}).Error("Start node controller failed, skipping")
+				return
+			}
+			mu.Lock()
+			started++
+			mu.Unlock()
+		}(i)
 	}
+	wg.Wait()
 	if started == 0 {
 		return fmt.Errorf("all %d node controllers failed to start", len(n.controllers))
 	}
