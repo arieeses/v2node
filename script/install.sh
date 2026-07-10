@@ -260,19 +260,22 @@ install_v2node() {
 
     mkdir /usr/local/v2node/ -p
     cd /usr/local/v2node/
-    # OOM/stability test build — pinned to the arieeses prerelease (batch-1).
-    # (Original version selection replaced so this installer always fetches the
-    # batch-1 test binary.)
-    echo -e "${green}安装 batch-2 测试版 (v0.4.6.11-b2-test)...${plain}"
-    if [[ "$arch" == "arm64-v8a" ]]; then
-        echo -e "${red}该测试版目前只提供 amd64，arm64 暂未构建${plain}"
+    # Always fetch the latest published (non-prerelease) build from arieeses.
+    # 'releases/latest/download/...' resolves to the newest normal release,
+    # skipping prereleases, so new versions ship without touching this script.
+    last_version=$(curl -Ls "https://api.github.com/repos/arieeses/v2node/releases/latest" | grep '"tag_name":' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+    echo -e "${green}下载 v2node 最新正式版 ${last_version} (${arch})...${plain}"
+    url="https://github.com/arieeses/v2node/releases/latest/download/v2node-linux-${arch}.zip"
+    echo -e "${green}下载地址: ${url}${plain}"
+    curl -L -o /usr/local/v2node/v2node-linux.zip "$url"
+    if [[ $? -ne 0 ]]; then
+        echo -e "${red}下载 v2node 失败，请确保服务器能访问 Github${plain}"
         exit 1
     fi
-    url="https://github.com/arieeses/v2node/releases/download/oom-test-1/v2node-linux-amd64"
-    echo -e "${green}下载地址: ${url}${plain}"
-    curl -L -o /usr/local/v2node/v2node "$url"
-    if [[ $? -ne 0 ]]; then
-        echo -e "${red}下载 v2node 测试版失败，请确保服务器能访问 Github${plain}"
+    unzip -o /usr/local/v2node/v2node-linux.zip -d /usr/local/v2node/ >/dev/null
+    rm -f /usr/local/v2node/v2node-linux.zip
+    if [[ ! -f /usr/local/v2node/v2node ]]; then
+        echo -e "${red}解压后未找到 v2node 可执行文件，请检查该架构 (${arch}) 是否有对应发布包${plain}"
         exit 1
     fi
 
@@ -365,7 +368,7 @@ EOF
     fi
 
 
-    curl -o /usr/bin/v2node -Ls https://raw.githubusercontent.com/arieeses/v2node/oom-test/script/v2node.sh
+    curl -o /usr/bin/v2node -Ls https://raw.githubusercontent.com/arieeses/v2node/main/script/v2node.sh
     chmod +x /usr/bin/v2node
 
     cd $cur_dir
