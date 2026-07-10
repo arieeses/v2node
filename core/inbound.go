@@ -148,20 +148,20 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string, disableSniffing bool) (*
 				in.StreamSetting = &coreConf.StreamConfig{}
 			}
 			in.StreamSetting.Security = "tls"
-			// OCSP stapling only makes sense for CA-issued certs (dns/http) that
-			// carry an OCSP responder URL. Self-signed / local-file certs have
-			// none, so enabling it just floods the log with "no OCSP server
-			// specified in cert" warnings on every connection. 0 = disabled.
-			var ocsp uint64 = 0
-			if m := nodeInfo.Common.CertInfo.CertMode; m == "dns" || m == "http" {
-				ocsp = 3600
-			}
+			// OCSP stapling is disabled unconditionally. It only works when the
+			// certificate embeds an OCSP responder URL; self-signed certs (the
+			// common case here) never do, so xray logs "no OCSP server specified
+			// in cert" on every TLS handshake. Keying it off CertMode is not
+			// reliable — nodes migrated from V2BX often carry CertMode "http"/"dns"
+			// while the actual cert file is self-signed, so those still flooded.
+			// Stapling brings no benefit for these nodes (matches XrayR/V2BX, which
+			// leave it off), so 0 everywhere kills the log flood at the source.
 			in.StreamSetting.TLSSettings = &coreConf.TLSConfig{
 				Certs: []*coreConf.TLSCertConfig{
 					{
 						CertFile:     nodeInfo.Common.CertInfo.CertFile,
 						KeyFile:      nodeInfo.Common.CertInfo.KeyFile,
-						OcspStapling: ocsp,
+						OcspStapling: 0,
 					},
 				},
 				RejectUnknownSNI: nodeInfo.Common.CertInfo.RejectUnknownSni,
