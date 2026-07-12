@@ -59,7 +59,10 @@ func (v *V2Core) addInbound(config *core.InboundHandlerConfig) error {
 }
 
 // BuildInbound build Inbound config for different protocol
-func buildInbound(nodeInfo *panel.NodeInfo, tag string, disableSniffing bool) (*core.InboundHandlerConfig, error) {
+// buildInbound builds the Xray inbound for a node. listenOverride/portOverride,
+// when set, rebind the inbound to a loopback address+port instead of the public
+// server_port — used when a sing-box shadow-tls front owns the public port.
+func buildInbound(nodeInfo *panel.NodeInfo, tag string, disableSniffing bool, listenOverride string, portOverride int) (*core.InboundHandlerConfig, error) {
 	in := &coreConf.InboundDetourConfig{}
 	var err error
 	switch nodeInfo.Type {
@@ -108,18 +111,24 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string, disableSniffing bool) (*
 			}
 		}
 	}
-	// Set server port
+	// Set server port. A shadow-tls node rebinds the real SS inbound to a
+	// loopback port (portOverride); sing-box owns the public server_port.
+	port := nodeInfo.Common.ServerPort
+	listenIP := nodeInfo.Common.ListenIP
+	if portOverride > 0 {
+		port = portOverride
+		listenIP = listenOverride
+	}
 	in.PortList = &coreConf.PortList{
 		Range: []coreConf.PortRange{
 			{
-				From: uint32(nodeInfo.Common.ServerPort),
-				To:   uint32(nodeInfo.Common.ServerPort),
+				From: uint32(port),
+				To:   uint32(port),
 			}},
 	}
 	// Set Listen IP address. UniProxy (XrayR-style) configs don't carry a
 	// listen_ip, so default to 0.0.0.0 — an empty address makes xray's
 	// InboundDetourConfig.Build panic on an empty domain string.
-	listenIP := nodeInfo.Common.ListenIP
 	if listenIP == "" {
 		listenIP = "0.0.0.0"
 	}
@@ -412,6 +421,11 @@ type ShadowsocksHTTPNetworkSettings struct {
 func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
 	inbound.Protocol = "shadowsocks"
 	s := nodeInfo.Common
+	// shadow-tls wraps the raw SS TCP stream; it can't be combined with HTTP
+	// obfs (which also rewrites the same stream) or a ws transport.
+	if s.ShadowTLSEnabled() && (s.Network == "ws" || len(s.NetworkSettings) != 0) {
+		return fmt.Errorf("shadowsocks shadow-tls cannot be combined with obfs/ws transport")
+	}
 	settings := &coreConf.ShadowsocksServerConfig{
 		Cipher: s.Cipher,
 	}
@@ -434,6 +448,43 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 	settings.Users = append(settings.Users, defaultSSuser)
 	// Default: support both tcp and udp
 	settings.NetworkList = &coreConf.NetworkList{"tcp", "udp"}
+	// v2ray-plugin (server) == Shadowsocks carried over a websocket transport.
+	// The panel signals it by setting network=ws with the ws host/path in
+	// network_settings; wire an Xray ws StreamSetting onto the SS inbound.
+	if s.Network == "ws" {
+		var wsIn struct {
+			Path string `json:"path"`
+			Host string `json:"Host"`
+		}
+		if len(s.NetworkSettings) != 0 {
+			if err := json.Unmarshal(s.NetworkSettings, &wsIn); err != nil {
+				return fmt.Errorf("unmarshal shadowsocks ws settings error: %s", err)
+			}
+		}
+		if wsIn.Path == "" {
+			wsIn.Path = "/"
+		}
+		// ws transport is stream-only; restrict to tcp at the protocol level.
+		settings.NetworkList = &coreConf.NetworkList{"tcp"}
+		t := coreConf.TransportProtocol("ws")
+		inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
+		wsCfg, err := json.Marshal(map[string]interface{}{
+			"path": wsIn.Path,
+			"host": wsIn.Host,
+		})
+		if err != nil {
+			return fmt.Errorf("marshal shadowsocks ws config error: %s", err)
+		}
+		if err := json.Unmarshal(wsCfg, &inbound.StreamSetting.WSSettings); err != nil {
+			return fmt.Errorf("build shadowsocks ws settings error: %s", err)
+		}
+		sets, err := json.Marshal(settings)
+		if err != nil {
+			return fmt.Errorf("marshal shadowsocks settings error: %s", err)
+		}
+		inbound.Settings = (*json.RawMessage)(&sets)
+		return nil
+	}
 	// Only set StreamSetting when NetworkSettings is configured
 	if len(s.NetworkSettings) != 0 {
 		shttp := &ShadowsocksHTTPNetworkSettings{}

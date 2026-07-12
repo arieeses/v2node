@@ -68,6 +68,18 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 // nodeNeedsRebuild checks only the fields that actually require a port
 // rebuild (DelNode + AddNode). Ignores json.RawMessage byte differences
 // and BaseConfig interval changes that don't affect the inbound listener.
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func nodeNeedsRebuild(old, new *panel.NodeInfo) bool {
 	if old == nil || new == nil || old.Common == nil || new.Common == nil {
 		return true
@@ -86,6 +98,15 @@ func nodeNeedsRebuild(old, new *panel.NodeInfo) bool {
 		o.ServerName != n.ServerName ||
 		o.CongestionControl != n.CongestionControl ||
 		o.Encryption != n.Encryption {
+		return true
+	}
+	// shadow-tls front settings — a change flips or reconfigures the sing-box
+	// process, which is (re)started from AddNode.
+	if o.ShadowTls != n.ShadowTls ||
+		o.ShadowTlsVersion != n.ShadowTlsVersion ||
+		o.ShadowTlsPassword != n.ShadowTlsPassword ||
+		o.ShadowTlsSni != n.ShadowTlsSni ||
+		!equalStringSlices(o.ShadowTlsPasswords, n.ShadowTlsPasswords) {
 		return true
 	}
 	// TLS settings

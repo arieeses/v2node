@@ -50,6 +50,28 @@ type GlobalConfig struct {
 	DnsConfigPath      string `mapstructure:"DnsConfigPath"`
 	InboundConfigPath  string `mapstructure:"InboundConfigPath"`
 	OutboundConfigPath string `mapstructure:"OutboundConfigPath"`
+
+	// SingBoxPath / SingBoxDir configure the sing-box subprocess used to
+	// terminate shadow-tls in front of a Shadowsocks inbound. Empty values
+	// fall back to the defaults below.
+	SingBoxPath string `mapstructure:"SingBoxPath"`
+	SingBoxDir  string `mapstructure:"SingBoxDir"`
+}
+
+// EffectiveSingBoxPath returns the configured sing-box binary path or the default.
+func (g GlobalConfig) EffectiveSingBoxPath() string {
+	if g.SingBoxPath != "" {
+		return g.SingBoxPath
+	}
+	return "/usr/local/bin/sing-box"
+}
+
+// EffectiveSingBoxDir returns the configured sing-box working dir or the default.
+func (g GlobalConfig) EffectiveSingBoxDir() string {
+	if g.SingBoxDir != "" {
+		return g.SingBoxDir
+	}
+	return "/etc/v2node/singbox"
 }
 
 // AutoSpeedLimitConfig mirrors XrayR's auto (dynamic) speed limit: a user whose
@@ -199,9 +221,9 @@ func (n *NodeConfig) EffectiveCert(g GlobalConfig) *CertConfig {
 //   - Global AutoSpeedLimit absent, or its Enable != true  => OFF on every node
 //     (per-node settings cannot re-enable it).
 //   - Global Enable == true:
-//       * node's own Enable == true  => use the NODE's values (each unset field
-//         falls back to the global value);
-//       * node Enable false/unset    => use the GLOBAL values.
+//   - node's own Enable == true  => use the NODE's values (each unset field
+//     falls back to the global value);
+//   - node Enable false/unset    => use the GLOBAL values.
 //
 // Returns nil when disabled or no trigger threshold (Limit <= 0) is set.
 func (n *NodeConfig) EffectiveAutoSpeedLimit(g GlobalConfig) *AutoSpeedLimitConfig {

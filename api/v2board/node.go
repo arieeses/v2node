@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 )
 
-
 // Security type
 const (
 	None    = 0
@@ -49,6 +48,12 @@ type CommonNode struct {
 	//shadowsocks
 	Cipher    string `json:"cipher"`
 	ServerKey string `json:"server_key"`
+	//shadowsocks shadow-tls plugin (front-terminated by a sing-box subprocess)
+	ShadowTls          int      `json:"shadow_tls"`
+	ShadowTlsVersion   int      `json:"shadow_tls_version"`
+	ShadowTlsPassword  string   `json:"shadow_tls_password"`
+	ShadowTlsPasswords []string `json:"shadow_tls_passwords,omitempty"`
+	ShadowTlsSni       string   `json:"shadow_tls_sni"`
 	//tuic
 	CongestionControl string `json:"congestion_control"`
 	ZeroRTTHandshake  bool   `json:"zero_rtt_handshake"`
@@ -363,6 +368,13 @@ func (t TlsSettings) EffectiveShortIds() []string {
 		return nil
 	}
 	return []string{t.ShortId}
+}
+
+// ShadowTLSEnabled reports whether this SS node should be fronted by a
+// shadow-tls terminator (a sing-box subprocess).
+func (c *CommonNode) ShadowTLSEnabled() bool {
+	return c.ShadowTls != 0 && c.ShadowTlsSni != "" &&
+		(c.ShadowTlsPassword != "" || len(c.ShadowTlsPasswords) > 0)
 }
 
 func (t TlsSettings) PrimaryServerName() string {

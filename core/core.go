@@ -5,6 +5,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
+	"github.com/wyx2685/v2node/common/singbox"
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core/app/dispatcher"
 	_ "github.com/wyx2685/v2node/core/distro/all"
@@ -34,6 +35,7 @@ type V2Core struct {
 	ihm        inbound.Manager
 	ohm        outbound.Manager
 	dispatcher *dispatcher.DefaultDispatcher
+	singbox    *singbox.Manager
 }
 
 type UserMap struct {
@@ -43,7 +45,11 @@ type UserMap struct {
 func New(config *conf.Conf) *V2Core {
 	core := &V2Core{
 		Config: config,
-		users: &UserMap{},
+		users:  &UserMap{},
+		singbox: singbox.NewManager(
+			config.Global.EffectiveSingBoxPath(),
+			config.Global.EffectiveSingBoxDir(),
+		),
 	}
 	return core
 }
@@ -64,6 +70,9 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 func (v *V2Core) Close() error {
 	v.access.Lock()
 	defer v.access.Unlock()
+	if v.singbox != nil {
+		v.singbox.StopAll()
+	}
 	v.Config = nil
 	v.ihm = nil
 	v.ohm = nil
