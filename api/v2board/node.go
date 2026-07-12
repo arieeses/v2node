@@ -48,12 +48,6 @@ type CommonNode struct {
 	//shadowsocks
 	Cipher    string `json:"cipher"`
 	ServerKey string `json:"server_key"`
-	//shadowsocks shadow-tls plugin (front-terminated by a sing-box subprocess)
-	ShadowTls          int      `json:"shadow_tls"`
-	ShadowTlsVersion   int      `json:"shadow_tls_version"`
-	ShadowTlsPassword  string   `json:"shadow_tls_password"`
-	ShadowTlsPasswords []string `json:"shadow_tls_passwords,omitempty"`
-	ShadowTlsSni       string   `json:"shadow_tls_sni"`
 	//tuic
 	CongestionControl string `json:"congestion_control"`
 	ZeroRTTHandshake  bool   `json:"zero_rtt_handshake"`
@@ -370,11 +364,54 @@ func (t TlsSettings) EffectiveShortIds() []string {
 	return []string{t.ShortId}
 }
 
+// SSPlugin is an SS SIP003 plugin config parsed from a node's network_settings
+// ({"plugin":"...","plugin_opts":"k=v;k=v"}).
+type SSPlugin struct {
+	Name string
+	Opts map[string]string
+}
+
+// Opt returns a plugin option value (empty string if absent).
+func (p *SSPlugin) Opt(k string) string {
+	if p == nil {
+		return ""
+	}
+	return p.Opts[k]
+}
+
+// ShadowsocksPlugin parses the SIP003 plugin carried in network_settings.
+// Returns nil when no plugin is configured.
+func (c *CommonNode) ShadowsocksPlugin() *SSPlugin {
+	if len(c.NetworkSettings) == 0 {
+		return nil
+	}
+	var ns struct {
+		Plugin     string `json:"plugin"`
+		PluginOpts string `json:"plugin_opts"`
+	}
+	if err := json.Unmarshal(c.NetworkSettings, &ns); err != nil || ns.Plugin == "" {
+		return nil
+	}
+	opts := make(map[string]string)
+	for _, pair := range strings.Split(ns.PluginOpts, ";") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		if i := strings.Index(pair, "="); i >= 0 {
+			opts[strings.TrimSpace(pair[:i])] = strings.TrimSpace(pair[i+1:])
+		} else {
+			opts[pair] = ""
+		}
+	}
+	return &SSPlugin{Name: ns.Plugin, Opts: opts}
+}
+
 // ShadowTLSEnabled reports whether this SS node should be fronted by a
 // shadow-tls terminator (a sing-box subprocess).
 func (c *CommonNode) ShadowTLSEnabled() bool {
-	return c.ShadowTls != 0 && c.ShadowTlsSni != "" &&
-		(c.ShadowTlsPassword != "" || len(c.ShadowTlsPasswords) > 0)
+	p := c.ShadowsocksPlugin()
+	return p != nil && p.Name == "shadow-tls" && p.Opt("host") != "" && p.Opt("password") != ""
 }
 
 func (t TlsSettings) PrimaryServerName() string {

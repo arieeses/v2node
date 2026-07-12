@@ -421,11 +421,6 @@ type ShadowsocksHTTPNetworkSettings struct {
 func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
 	inbound.Protocol = "shadowsocks"
 	s := nodeInfo.Common
-	// shadow-tls wraps the raw SS TCP stream; it can't be combined with HTTP
-	// obfs (which also rewrites the same stream) or a ws transport.
-	if s.ShadowTLSEnabled() && (s.Network == "ws" || len(s.NetworkSettings) != 0) {
-		return fmt.Errorf("shadowsocks shadow-tls cannot be combined with obfs/ws transport")
-	}
 	settings := &coreConf.ShadowsocksServerConfig{
 		Cipher: s.Cipher,
 	}
@@ -448,42 +443,48 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 	settings.Users = append(settings.Users, defaultSSuser)
 	// Default: support both tcp and udp
 	settings.NetworkList = &coreConf.NetworkList{"tcp", "udp"}
-	// v2ray-plugin (server) == Shadowsocks carried over a websocket transport.
-	// The panel signals it by setting network=ws with the ws host/path in
-	// network_settings; wire an Xray ws StreamSetting onto the SS inbound.
-	if s.Network == "ws" {
-		var wsIn struct {
-			Path string `json:"path"`
-			Host string `json:"Host"`
-		}
-		if len(s.NetworkSettings) != 0 {
-			if err := json.Unmarshal(s.NetworkSettings, &wsIn); err != nil {
-				return fmt.Errorf("unmarshal shadowsocks ws settings error: %s", err)
+	// SS plugin config is carried in network_settings ({plugin, plugin_opts}).
+	//   v2ray-plugin => Shadowsocks over a websocket transport.
+	//   shadow-tls   => plain SS on a loopback port; a sing-box front (started
+	//                   from AddNode) terminates the TLS layer on the public port.
+	if plugin := s.ShadowsocksPlugin(); plugin != nil {
+		switch plugin.Name {
+		case "v2ray-plugin":
+			path := plugin.Opt("path")
+			if path == "" {
+				path = "/"
 			}
+			// ws transport is stream-only; restrict to tcp at the protocol level.
+			settings.NetworkList = &coreConf.NetworkList{"tcp"}
+			t := coreConf.TransportProtocol("ws")
+			inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
+			wsCfg, err := json.Marshal(map[string]interface{}{
+				"path": path,
+				"host": plugin.Opt("host"),
+			})
+			if err != nil {
+				return fmt.Errorf("marshal shadowsocks ws config error: %s", err)
+			}
+			if err := json.Unmarshal(wsCfg, &inbound.StreamSetting.WSSettings); err != nil {
+				return fmt.Errorf("build shadowsocks ws settings error: %s", err)
+			}
+			sets, err := json.Marshal(settings)
+			if err != nil {
+				return fmt.Errorf("marshal shadowsocks settings error: %s", err)
+			}
+			inbound.Settings = (*json.RawMessage)(&sets)
+			return nil
+		case "shadow-tls":
+			// Plain SS; the sing-box shadow-tls front owns the public port and
+			// relays the peeled stream here. No stream settings needed.
+			sets, err := json.Marshal(settings)
+			if err != nil {
+				return fmt.Errorf("marshal shadowsocks settings error: %s", err)
+			}
+			inbound.Settings = (*json.RawMessage)(&sets)
+			return nil
 		}
-		if wsIn.Path == "" {
-			wsIn.Path = "/"
-		}
-		// ws transport is stream-only; restrict to tcp at the protocol level.
-		settings.NetworkList = &coreConf.NetworkList{"tcp"}
-		t := coreConf.TransportProtocol("ws")
-		inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
-		wsCfg, err := json.Marshal(map[string]interface{}{
-			"path": wsIn.Path,
-			"host": wsIn.Host,
-		})
-		if err != nil {
-			return fmt.Errorf("marshal shadowsocks ws config error: %s", err)
-		}
-		if err := json.Unmarshal(wsCfg, &inbound.StreamSetting.WSSettings); err != nil {
-			return fmt.Errorf("build shadowsocks ws settings error: %s", err)
-		}
-		sets, err := json.Marshal(settings)
-		if err != nil {
-			return fmt.Errorf("marshal shadowsocks settings error: %s", err)
-		}
-		inbound.Settings = (*json.RawMessage)(&sets)
-		return nil
+		// Unknown plugin: fall through to a plain SS inbound.
 	}
 	// Only set StreamSetting when NetworkSettings is configured
 	if len(s.NetworkSettings) != 0 {

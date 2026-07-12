@@ -13,6 +13,7 @@ package singbox
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
 )
@@ -37,22 +38,19 @@ type Config struct {
 	StrictMode    bool
 }
 
-// ConfigFromNode maps a Shadowsocks NodeInfo's shadow-tls fields plus the
-// allocated loopback port into a Config.
+// ConfigFromNode maps a Shadowsocks node's shadow-tls plugin options (from
+// network_settings) plus the allocated loopback port into a Config.
+// The plugin_opts convention is "host=<handshake>;password=<pw>;version=<n>".
 func ConfigFromNode(tag string, info *panel.NodeInfo, internalPort int) *Config {
 	c := info.Common
-	version := c.ShadowTlsVersion
-	if version == 0 {
-		version = 3
-	}
-	var users []User
-	if len(c.ShadowTlsPasswords) > 0 {
-		for i, p := range c.ShadowTlsPasswords {
-			users = append(users, User{Name: fmt.Sprintf("u%d", i), Password: p})
+	plugin := c.ShadowsocksPlugin()
+	version := 3
+	if v := plugin.Opt("version"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			version = n
 		}
-	} else {
-		users = append(users, User{Name: "u0", Password: c.ShadowTlsPassword})
 	}
+	users := []User{{Name: "u0", Password: plugin.Opt("password")}}
 	listen := c.ListenIP
 	if listen == "" {
 		listen = "0.0.0.0"
@@ -65,7 +63,7 @@ func ConfigFromNode(tag string, info *panel.NodeInfo, internalPort int) *Config 
 		InternalPort:  internalPort,
 		Version:       version,
 		Users:         users,
-		HandshakeHost: c.ShadowTlsSni,
+		HandshakeHost: plugin.Opt("host"),
 		HandshakePort: 443,
 		StrictMode:    true,
 	}
