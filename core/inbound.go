@@ -111,6 +111,38 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string, disableSniffing bool, li
 			}
 		}
 	}
+	// Enable TCP keepalive on TCP-based inbounds so half-dead client
+	// connections — e.g. upstream relays that rotate their IP hourly and then
+	// vanish without ever sending FIN/RST — are detected and reaped by the
+	// kernel in ~2 minutes, instead of lingering as ESTABLISHED for hours/days
+	// and piling up (fd + memory growth that only a restart clears). idle 30s +
+	// interval 10s + the system default probe count (9) => ~120s to close a
+	// dead peer. App-layer ConnIdle can't catch these because the kernel still
+	// believes the socket is alive; only SO_KEEPALIVE at the socket layer probes
+	// and tears them down. Skipped for hysteria2/tuic (UDP/QUIC): TCP_KEEPIDLE
+	// on a UDP socket would error.
+	switch nodeInfo.Type {
+	case "hysteria2", "tuic":
+		// UDP transports — TCP keepalive does not apply.
+	default:
+		if in.StreamSetting == nil {
+			t := coreConf.TransportProtocol(nodeInfo.Common.Network)
+			in.StreamSetting = &coreConf.StreamConfig{Network: &t}
+		}
+		if in.StreamSetting.SocketSettings == nil {
+			in.StreamSetting.SocketSettings = &coreConf.SocketConfig{}
+		}
+		in.StreamSetting.SocketSettings.TCPKeepAliveIdle = 30
+		in.StreamSetting.SocketSettings.TCPKeepAliveInterval = 10
+		// TCP_USER_TIMEOUT (milliseconds): also abort a connection whose SENT
+		// data stays unacknowledged this long. This reaps the "stuck with
+		// in-flight data" dead peers that keepalive alone cannot (keepalive only
+		// probes idle sockets, not ones actively retransmitting). 90s is a
+		// deliberate balance: fast enough to clear relays that rotated their IP
+		// away, but long enough to tolerate transient stalls on a lossy AWS path
+		// so a slow-but-alive transfer is not cut prematurely.
+		in.StreamSetting.SocketSettings.TCPUserTimeout = 90000
+	}
 	// Set server port. A shadow-tls node rebinds the real SS inbound to a
 	// loopback port (portOverride); sing-box owns the public server_port.
 	port := nodeInfo.Common.ServerPort
