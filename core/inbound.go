@@ -126,7 +126,15 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string, disableSniffing bool, li
 		// UDP transports — TCP keepalive does not apply.
 	default:
 		if in.StreamSetting == nil {
-			t := coreConf.TransportProtocol(nodeInfo.Common.Network)
+			// Plain shadowsocks/trojan nodes carry no network in the panel data;
+			// an empty TransportProtocol makes xray reject the config with
+			// "unknown transport protocol". Default to tcp, matching xray's own
+			// default when StreamSetting is absent.
+			network := nodeInfo.Common.Network
+			if network == "" {
+				network = "tcp"
+			}
+			t := coreConf.TransportProtocol(network)
 			in.StreamSetting = &coreConf.StreamConfig{Network: &t}
 		}
 		if in.StreamSetting.SocketSettings == nil {
