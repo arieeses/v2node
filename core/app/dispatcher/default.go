@@ -174,7 +174,16 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 	if user != nil && len(user.Email) > 0 {
 		limit, err = limiter.GetLimiter(sessionInbound.Tag)
 		if err != nil {
-			errors.LogInfo(ctx, "get limiter ", sessionInbound.Tag, " error: ", err)
+			// A gone limiter means this tag's inbound was torn down and this is an
+			// ORPHANED connection still dispatching. Only anytls's persistent mux
+			// keeps doing this (one-shot protocols end when Process returns); left
+			// alone it spins forever and floods "get limiter not found". Close the
+			// underlying connection so the orphan actually dies — for anytls this
+			// tears down the whole mux and the client reconnects to a live inbound.
+			errors.LogInfo(ctx, "get limiter ", sessionInbound.Tag, " not found; closing orphaned connection")
+			if sessionInbound.Conn != nil {
+				_ = sessionInbound.Conn.Close()
+			}
 			common.Close(outboundLink.Writer)
 			common.Close(inboundLink.Writer)
 			common.Interrupt(outboundLink.Reader)
@@ -396,7 +405,13 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
 	if user != nil && len(user.Email) > 0 {
 		limit, err = limiter.GetLimiter(sessionInbound.Tag)
 		if err != nil {
-			errors.LogInfo(ctx, "get limiter ", sessionInbound.Tag, " error: ", err)
+			// See getLink: a gone limiter means the inbound was torn down and this
+			// is an orphaned connection. Close it so the orphan dies instead of
+			// flooding "get limiter not found"; for anytls this closes the whole mux.
+			errors.LogInfo(ctx, "get limiter ", sessionInbound.Tag, " not found; closing orphaned connection")
+			if sessionInbound.Conn != nil {
+				_ = sessionInbound.Conn.Close()
+			}
 			common.Close(outbound.Writer)
 			common.Interrupt(outbound.Reader)
 			return errors.New("get limiter ", sessionInbound.Tag, " error: ", err)

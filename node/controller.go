@@ -146,9 +146,31 @@ func (c *Controller) applyCertOverride() {
 	}
 }
 
-// Close implement the Close() function of the service interface
+// Close implement the Close() function of the service interface. It also
+// removes the node's rate limiter — use it for a full shutdown or when a node
+// is genuinely gone.
 func (c *Controller) Close() error {
-	limiter.DeleteLimiter(c.tag)
+	return c.close(true)
+}
+
+// CloseForReload tears the node down but KEEPS its rate limiter in the global
+// map. A hot reload closes every node and immediately rebuilds it; deleting the
+// limiter here opens a window — the whole (slow) teardown+rebuild — during which
+// the tag has NO limiter. An anytls mux connection survives inbound removal
+// (xray's tcpWorker.Close closes the listener, not accepted connections) and
+// keeps spawning sub-streams; each then hits "get limiter not found", the
+// dispatcher kills it, and the log floods + anytls breaks for the whole reload.
+// A node whose re-Start fails floods permanently. Keeping the entry lets the
+// rebuild's AddLimiter overwrite it in place (same tag), so the limiter is never
+// absent. Nodes removed by the new config are pruned by the reload caller.
+func (c *Controller) CloseForReload() error {
+	return c.close(false)
+}
+
+func (c *Controller) close(deleteLimiter bool) error {
+	if deleteLimiter {
+		limiter.DeleteLimiter(c.tag)
+	}
 	if c.nodeInfoMonitorPeriodic != nil {
 		c.nodeInfoMonitorPeriodic.Close()
 	}

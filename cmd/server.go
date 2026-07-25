@@ -169,7 +169,15 @@ func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
 		oldReloadCh = (*v2core).ReloadCh
 	}
 
-	if err := (*nodes).Close(); err != nil {
+	// Keep each surviving node's rate limiter alive across the teardown: capture
+	// the old tags now, tear down with CloseForReload (which does NOT delete
+	// limiters), then after the rebuild prune only the limiters of nodes that are
+	// gone. The old Close deleted EVERY limiter here, leaving a ~teardown-long
+	// window with no limiter, during which anytls mux connections that outlive
+	// inbound removal flooded "get limiter not found". See Controller.CloseForReload.
+	oldTags := (*nodes).Tags()
+
+	if err := (*nodes).CloseForReload(); err != nil {
 		log.WithField("err", err).Error("Close old nodes failed during reload")
 	}
 	if err := (*v2core).Close(); err != nil {
@@ -212,6 +220,19 @@ func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
 
 	if err := newNodes.Start(newCore); err != nil {
 		return fmt.Errorf("start new nodes: %w", err)
+	}
+
+	// Prune limiters of nodes that existed before but are gone in the new config.
+	// Surviving nodes' limiters were overwritten in place by newNodes.Start
+	// (AddLimiter), so they were never absent — no reload window, no flood.
+	newTagSet := make(map[string]struct{}, len(newNodes.Tags()))
+	for _, t := range newNodes.Tags() {
+		newTagSet[t] = struct{}{}
+	}
+	for _, t := range oldTags {
+		if _, ok := newTagSet[t]; !ok {
+			limiter.DeleteLimiter(t)
+		}
 	}
 
 	*nodes = newNodes

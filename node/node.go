@@ -125,3 +125,26 @@ func (n *Node) Close() error {
 	n.controllers = nil
 	return nil
 }
+
+// CloseForReload closes every controller WITHOUT deleting its rate limiter, so a
+// hot reload never leaves a tag without a limiter (see Controller.CloseForReload).
+// The caller prunes limiters of nodes that are gone in the new config.
+func (n *Node) CloseForReload() error {
+	for _, c := range n.controllers {
+		if err := c.CloseForReload(); err != nil {
+			log.WithField("err", err).Error("Close controller failed")
+		}
+	}
+	n.controllers = nil
+	return nil
+}
+
+// Tags returns the tag of every controller. Used across a reload to prune the
+// limiters of nodes that no longer exist in the new config.
+func (n *Node) Tags() []string {
+	tags := make([]string, 0, len(n.controllers))
+	for _, c := range n.controllers {
+		tags = append(tags, c.tag)
+	}
+	return tags
+}
