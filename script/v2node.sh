@@ -611,6 +611,31 @@ MAP
     fi
 }
 
+start_haproxy() {
+    if ! command -v haproxy >/dev/null 2>&1; then
+        echo -e "${red}未检测到 HAProxy，请先用菜单 16 安装${plain}" && return 1
+    fi
+    systemctl start haproxy && echo -e "${green}HAProxy 已启动${plain}" || echo -e "${red}HAProxy 启动失败${plain}"
+    ss -tlnp 2>/dev/null | grep -w 443
+}
+
+stop_haproxy() {
+    systemctl stop haproxy && echo -e "${green}HAProxy 已停止${plain}" || echo -e "${red}HAProxy 停止失败${plain}"
+}
+
+restart_haproxy() {
+    if ! command -v haproxy >/dev/null 2>&1; then
+        echo -e "${red}未检测到 HAProxy，请先用菜单 16 安装${plain}" && return 1
+    fi
+    # 先校验配置，避免坏配置把服务弄挂
+    if haproxy -c -f /etc/haproxy/haproxy.cfg; then
+        systemctl restart haproxy && echo -e "${green}HAProxy 已重启${plain}" || echo -e "${red}HAProxy 重启失败${plain}"
+        ss -tlnp 2>/dev/null | grep -w 443
+    else
+        echo -e "${red}配置校验失败，未重启（先修 /etc/haproxy/haproxy.cfg）${plain}" && return 1
+    fi
+}
+
 show_usage() {
     echo "v2node 管理脚本使用方法: "
     echo "------------------------------------------"
@@ -657,12 +682,15 @@ show_menu() {
   ${green}14.${plain} 放行 VPS 的所有网络端口
 ————————————————
   ${green}16.${plain} 一键安装 HAProxy（443 SNI 分流）
+  ${green}17.${plain} 启动 HAProxy
+  ${green}18.${plain} 停止 HAProxy
+  ${green}19.${plain} 重启 HAProxy
 ————————————————
   ${green}15.${plain} 退出脚本
  "
  #后续更新可加入上方字符串中
     show_status
-    echo && read -rp "请输入选择 [0-16]: " num
+    echo && read -rp "请输入选择 [0-19]: " num
 
     case "${num}" in
         0) config ;;
@@ -682,7 +710,10 @@ show_menu() {
         14) open_ports ;;
         15) exit ;;
         16) install_haproxy ;;
-        *) echo -e "${red}请输入正确的数字 [0-16]${plain}" ;;
+        17) start_haproxy ;;
+        18) stop_haproxy ;;
+        19) restart_haproxy ;;
+        *) echo -e "${red}请输入正确的数字 [0-19]${plain}" ;;
     esac
 }
 
@@ -704,6 +735,9 @@ if [[ $# > 0 ]]; then
         "version") check_install 0 && show_v2node_version 0 ;;
         "update_shell") update_shell ;;
         "haproxy") install_haproxy ;;
+        "haproxy-start") start_haproxy ;;
+        "haproxy-stop") stop_haproxy ;;
+        "haproxy-restart") restart_haproxy ;;
         *) show_usage
     esac
 else
