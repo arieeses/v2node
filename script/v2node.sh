@@ -484,6 +484,133 @@ open_ports() {
     echo -e "${green}放开防火墙端口成功！${plain}"
 }
 
+install_haproxy() {
+    echo -e "${green}开始安装 HAProxy 并生成 443 SNI 分流配置...${plain}"
+    # 按系统类型安装
+    case "${release}" in
+        ubuntu | debian)
+            apt update -y >/dev/null 2>&1
+            apt install -y haproxy socat
+            ;;
+        centos)
+            (command -v dnf >/dev/null 2>&1 && dnf install -y haproxy socat) || yum install -y haproxy socat
+            ;;
+        alpine)
+            apk add haproxy socat
+            ;;
+        arch)
+            pacman -Sy --noconfirm haproxy socat
+            ;;
+        *)
+            echo -e "${red}不支持的系统: ${release}${plain}" && return 1
+            ;;
+    esac
+    if ! command -v haproxy >/dev/null 2>&1; then
+        echo -e "${red}HAProxy 安装失败，请检查软件源${plain}" && return 1
+    fi
+
+    mkdir -p /etc/haproxy
+    [ -f /etc/haproxy/haproxy.cfg ] && cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak
+
+    # 检测版本决定 keepalive 写法：2.4+ 用 clitcpka-idle/intvl/cnt，旧版(如 Debian11 的 2.2)走 sysctl
+    local ver ka
+    ver=$(haproxy -v 2>/dev/null | grep -oiE '[0-9]+\.[0-9]+' | head -1)
+    if [ -n "$ver" ] && awk "BEGIN{exit !($ver>=2.4)}"; then
+        ka=$'    option clitcpka\n    clitcpka-idle  30s\n    clitcpka-intvl 10s\n    clitcpka-cnt   6'
+    else
+        ka='    option clitcpka'
+        cat >/etc/sysctl.d/99-haproxy-ka.conf <<'SYS'
+net.ipv4.tcp_keepalive_time = 30
+net.ipv4.tcp_keepalive_intvl = 10
+net.ipv4.tcp_keepalive_probes = 6
+SYS
+        sysctl -p /etc/sysctl.d/99-haproxy-ka.conf >/dev/null 2>&1
+    fi
+
+    # 生成 /etc/haproxy/haproxy.cfg
+    cat >/etc/haproxy/haproxy.cfg <<EOF
+global
+    log /dev/log local0
+    maxconn 200000
+    stats socket /run/haproxy/admin.sock mode 660 level admin
+    stats timeout 30s
+
+defaults
+    mode tcp
+    log global
+    option tcplog
+    timeout connect 5s
+    timeout client  1h
+    timeout server  1h
+    timeout tunnel  1h
+    # 客户端方向 TCP keepalive：上游每小时换 IP 时，~90s 内回收死连接
+${ka}
+
+frontend fe_443
+    bind :443
+    bind :::443
+    mode tcp
+    tcp-request inspect-delay 200ms
+    # 抓 SNI 进日志，排查用
+    tcp-request content capture req.ssl_sni len 100
+    log-format "%ci:%cp sni=%[capture.req.hdr(0)] -> %b %ts"
+    # 只放行：是 TLS ClientHello 且 SNI 在 map 里；其余(非TLS/无SNI/未知SNI/扫描器)一律拒绝
+    tcp-request content accept if { req.ssl_hello_type 1 } { req.ssl_sni,lower,map_dom(/etc/haproxy/sni.map) -m found }
+    tcp-request content reject
+    use_backend %[req.ssl_sni,lower,map_dom(/etc/haproxy/sni.map,be_reject)]
+
+# 兜底黑洞：未匹配的正常到不了这里(已被 reject)；无 server = 直接断开
+backend be_reject
+    mode tcp
+
+# ---- 每个域名 -> 它节点真实监听的端口 ----
+backend be_node1
+    server s 127.0.0.1:33001
+backend be_node2
+    server s 127.0.0.1:33002
+backend be_node3
+    server s 127.0.0.1:33003
+backend be_node4
+    server s 127.0.0.1:33004
+backend be_node5
+    server s 127.0.0.1:33005
+backend be_node6
+    server s 127.0.0.1:33006
+backend be_node7
+    server s 127.0.0.1:33007
+backend be_node8
+    server s 127.0.0.1:33008
+EOF
+
+    # 生成 /etc/haproxy/sni.map（已存在则不覆盖，避免冲掉你已有的映射）
+    if [ ! -f /etc/haproxy/sni.map ]; then
+        cat >/etc/haproxy/sni.map <<'MAP'
+# 域名(节点 serverName)      后端(be_nodeN 对应 127.0.0.1:3300N)
+node1.example.com   be_node1
+node2.example.com   be_node2
+node3.example.com   be_node3
+node4.example.com   be_node4
+node5.example.com   be_node5
+node6.example.com   be_node6
+node7.example.com   be_node7
+node8.example.com   be_node8
+MAP
+    fi
+
+    # 校验并启动
+    if haproxy -c -f /etc/haproxy/haproxy.cfg; then
+        systemctl enable haproxy >/dev/null 2>&1
+        systemctl restart haproxy
+        echo -e "${green}HAProxy 安装并启动成功！${plain}"
+        echo -e "主配置：${green}/etc/haproxy/haproxy.cfg${plain}"
+        echo -e "分流映射：${green}/etc/haproxy/sni.map${plain}（把域名改成你的节点 serverName，并对准真实端口 be_nodeN -> 3300N）"
+        echo -e "改完后执行：${green}haproxy -c -f /etc/haproxy/haproxy.cfg \&\& systemctl reload haproxy${plain}"
+        ss -tlnp 2>/dev/null | grep -w 443 || echo -e "${red}注意：443 未监听，可能被节点占用（先把占 443 的节点改到 3300x）${plain}"
+    else
+        echo -e "${red}HAProxy 配置校验失败，请检查 /etc/haproxy/haproxy.cfg${plain}" && return 1
+    fi
+}
+
 show_usage() {
     echo "v2node 管理脚本使用方法: "
     echo "------------------------------------------"
@@ -528,11 +655,14 @@ show_menu() {
   ${green}12.${plain} 升级 v2node 维护脚本
   ${green}13.${plain} 生成 v2node 配置文件
   ${green}14.${plain} 放行 VPS 的所有网络端口
+————————————————
+  ${green}16.${plain} 一键安装 HAProxy（443 SNI 分流）
+————————————————
   ${green}15.${plain} 退出脚本
  "
  #后续更新可加入上方字符串中
     show_status
-    echo && read -rp "请输入选择 [0-15]: " num
+    echo && read -rp "请输入选择 [0-16]: " num
 
     case "${num}" in
         0) config ;;
@@ -551,7 +681,8 @@ show_menu() {
         13) generate_config_file ;;
         14) open_ports ;;
         15) exit ;;
-        *) echo -e "${red}请输入正确的数字 [0-15]${plain}" ;;
+        16) install_haproxy ;;
+        *) echo -e "${red}请输入正确的数字 [0-16]${plain}" ;;
     esac
 }
 
@@ -572,6 +703,7 @@ if [[ $# > 0 ]]; then
         "uninstall") check_install 0 && uninstall 0 ;;
         "version") check_install 0 && show_v2node_version 0 ;;
         "update_shell") update_shell ;;
+        "haproxy") install_haproxy ;;
         *) show_usage
     esac
 else
