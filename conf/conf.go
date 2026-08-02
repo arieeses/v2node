@@ -140,7 +140,7 @@ type NodeConfig struct {
 func New() *Conf {
 	return &Conf{
 		LogConfig: LogConfig{
-			Level:  "info",
+			Level:  "warning",
 			Output: "",
 			Access: "none",
 		},

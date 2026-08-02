@@ -199,13 +199,15 @@ func (l *Limiter) CheckLimit(taguuid string, ip string, noUDPsource bool) (Dynam
 		deviceLimit = u.DeviceLimit
 		uid = u.UID
 		if u.ExpireTime < time.Now().Unix() && u.ExpireTime != 0 {
-			if u.SpeedLimit != 0 {
-				userLimit = u.SpeedLimit
-				u.DynamicSpeedLimit = 0
-				u.ExpireTime = 0
-			} else {
-				l.UserLimitInfo.Delete(taguuid)
-			}
+			// Dynamic speed limit expired: clear it and fall back to the user's
+			// base SpeedLimit (0 = unlimited, which then falls back to the node
+			// limit). Do NOT delete the whole entry — deleting it makes the very
+			// next CheckLimit Load() miss and hit the `return nil, true` reject
+			// branch below, kicking the user offline until the next panel sync
+			// re-adds them.
+			u.DynamicSpeedLimit = 0
+			u.ExpireTime = 0
+			userLimit = u.SpeedLimit
 		} else {
 			userLimit = determineSpeedLimit(u.SpeedLimit, u.DynamicSpeedLimit)
 		}

@@ -312,6 +312,12 @@ EOF
         echo -e "${green}v2node ${last_version}${plain} 安装完成，已设置开机自启"
     else
         rm /etc/systemd/system/v2node.service -f
+        # GOMEMLIMIT ≈ 80% of total RAM: a soft cap so Go GCs hard near the
+        # ceiling instead of getting OOM-killed on a traffic burst. GOGC=50 keeps
+        # steady-state RSS lower on small boxes. (High memory is THP bloat + GC
+        # headroom, not a leak.)
+        mem_mib=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 1024)
+        gomemlimit=$(( mem_mib * 80 / 100 )); [ "$gomemlimit" -lt 128 ] && gomemlimit=128
         cat <<EOF > /etc/systemd/system/v2node.service
 [Unit]
 Description=v2node Service
@@ -322,6 +328,8 @@ Wants=network.target
 User=root
 Group=root
 Type=simple
+Environment=GOMEMLIMIT=${gomemlimit}MiB
+Environment=GOGC=50
 LimitAS=infinity
 LimitRSS=infinity
 LimitCORE=infinity
