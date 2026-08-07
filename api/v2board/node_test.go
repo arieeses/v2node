@@ -10,6 +10,7 @@ func TestNormalizeNodeType(t *testing.T) {
 		"v2ray": "vmess", "hysteria": "hysteria2", "hysteria2": "hysteria2",
 		"trojan": "trojan", "vless": "vless", "shadowsocks": "shadowsocks",
 		"Shadowsocks": "shadowsocks", "V2ray": "vmess", "TROJAN": "trojan", // case-insensitive
+		"shadowflow": "shadowflow", "ShadowFlow": "shadowflow", "SHADOWFLOW": "shadowflow", // ShadowFlow 双认
 	} {
 		if got := normalizeNodeType(in); got != want {
 			t.Errorf("normalizeNodeType(%q)=%q want %q", in, got, want)

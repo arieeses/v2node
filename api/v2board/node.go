@@ -155,16 +155,21 @@ func (c *Client) getNodeInfoV2(ctx context.Context) (node *NodeInfo, err error) 
 	if err = json.Unmarshal(r.Body(), cm); err != nil {
 		return nil, fmt.Errorf("decode node params error: %s", err)
 	}
-	switch cm.Protocol {
+	// Canonicalize the panel-supplied protocol name (case-insensitive +
+	// aliases like v2ray→vmess). This makes ShadowFlow dual-recognized:
+	// the panel may send "ShadowFlow" or "shadowflow"; internally we always
+	// key off the canonical lowercase "shadowflow".
+	proto := normalizeNodeType(cm.Protocol)
+	switch proto {
 	case "hysteria2", "tuic":
 		// QUIC protocols mandate TLS regardless of the panel's tls flag.
-		node.Type = cm.Protocol
+		node.Type = proto
 		node.Security = Tls
 	case "vmess", "trojan", "anytls", "vless", "shadowflow":
-		node.Type = cm.Protocol
+		node.Type = proto
 		node.Security = cm.Tls
 	case "shadowsocks":
-		node.Type = cm.Protocol
+		node.Type = proto
 		node.Security = 0
 	default:
 		return nil, fmt.Errorf("unsupport protocol: %s", cm.Protocol)

@@ -253,8 +253,9 @@ func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *tran
 	}
 
 	// ShadowFlow: inject TLS Record Size camouflage engine
-	// This wraps the writers so all data is reshaped to match real browser traffic
-	if sessionInbound != nil && strings.Contains(sessionInbound.Tag, "shadowflow") {
+	// This wraps the writers so all data is reshaped to match real browser traffic.
+	// Tag match is case-insensitive so a "ShadowFlow"-cased node type still triggers it.
+	if sessionInbound != nil && strings.Contains(strings.ToLower(sessionInbound.Tag), "shadowflow") {
 		var engine *shadowflow.CamouflageEngine
 		if cached, ok := d.CamouflageEngines.Load(sessionInbound.Tag); ok {
 			engine = cached.(*shadowflow.CamouflageEngine)
