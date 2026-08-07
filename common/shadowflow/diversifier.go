@@ -115,19 +115,15 @@ func (d *Diversifier) UpdateSNIPool(sniPool []string) {
 	}
 }
 
-// ApplyIdentity configures a CamouflageEngine with the given identity.
+// ApplyIdentity configures a CamouflageEngine's base profile from the identity.
+//
+// The initial-packet sequence is tracked per connection inside ShapedBufWriter
+// (not on the shared engine), so there are no engine-level counters to reset
+// here anymore.
 func ApplyIdentity(engine *CamouflageEngine, identity *ClientIdentity) {
-	// Set the traffic profile
-	profile := GetProfile(identity.ProfileName)
-	engine.activeProfile.Store(profile)
-
-	// Adjust engine behavior based on identity traits
-	engine.mu.Lock()
-	defer engine.mu.Unlock()
-
-	// Reset packet counters for fresh initial sequence
-	engine.c2sPacketIndex = 0
-	engine.s2cPacketIndex = 0
+	if profile := GetProfile(identity.ProfileName); profile != nil {
+		engine.activeProfile.Store(profile)
+	}
 }
 
 // GetKeepAliveInterval returns the keep-alive interval for the given style.

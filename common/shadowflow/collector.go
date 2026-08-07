@@ -4,9 +4,35 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 )
+
+// profileBaseDir confines operator-supplied custom-profile paths. Custom
+// profile file names come from the panel API, so they must never be able to
+// read arbitrary files: the configured value is resolved RELATIVE to this
+// directory and any traversal ("..") is neutralized.
+const profileBaseDir = "/etc/v2node/profiles"
+
+// resolveProfilePath maps a panel-supplied profile path to a safe absolute path
+// under profileBaseDir, rejecting escapes and non-.json files.
+func resolveProfilePath(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("empty profile path")
+	}
+	// Prepend "/" then Clean so ".." cannot climb above the (virtual) root,
+	// then join onto the base dir — the result is always within profileBaseDir.
+	full := filepath.Join(profileBaseDir, filepath.Clean("/"+path))
+	if full != profileBaseDir && !strings.HasPrefix(full, profileBaseDir+string(filepath.Separator)) {
+		return "", fmt.Errorf("profile path escapes base dir: %q", path)
+	}
+	if filepath.Ext(full) != ".json" {
+		return "", fmt.Errorf("custom profile must be a .json file: %q", path)
+	}
+	return full, nil
+}
 
 // ====================================================================
 // Traffic Profile Collector
@@ -193,7 +219,11 @@ func (pc *ProfileCollector) ExportToFile(path string, initialCount int) error {
 // LoadProfileFromJSON loads a TrafficProfile from a JSON file.
 // This allows importing profiles collected on remote machines.
 func LoadProfileFromJSON(path string) (*TrafficProfile, error) {
-	data, err := os.ReadFile(path)
+	safePath, err := resolveProfilePath(path)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(safePath)
 	if err != nil {
 		return nil, fmt.Errorf("read profile file: %w", err)
 	}

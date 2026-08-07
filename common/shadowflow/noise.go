@@ -26,6 +26,13 @@ import (
 
 // NoiseInjector sends camouflage noise into a connection to disrupt
 // the timing pattern of inner TLS handshakes.
+//
+// ⚠️  SAFETY: the writer passed to NewNoiseInjector MUST be frame-aware —
+// i.e. a ShadowStream connection where noise is carried in FramePadding /
+// FrameHeartbeat frames that the peer discards. NEVER attach a NoiseInjector
+// directly to a raw proxied connection (VLESS passthrough): sendNoise writes
+// bytes with no framing and no length marker, so on a raw tunnel every noise
+// byte is delivered to the peer as application data and CORRUPTS the stream.
 type NoiseInjector struct {
 	writer  io.Writer
 	engine  *CamouflageEngine
@@ -145,9 +152,11 @@ func (ni *NoiseInjector) sendNoise(size int) error {
 	if size <= 0 {
 		return nil
 	}
-	buf := make([]byte, size)
-	rand.Read(buf)
-	_, err := ni.writer.Write(buf)
+	b := make([]byte, size)
+	if _, err := rand.Read(b); err != nil {
+		return err
+	}
+	_, err := ni.writer.Write(b)
 	return err
 }
 

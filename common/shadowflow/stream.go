@@ -257,10 +257,16 @@ func (sc *ShadowStreamConn) readLoop() {
 			if v, ok := sc.streams.Load(frame.StreamID); ok {
 				s := v.(*Stream)
 				if !s.closed.Load() {
+					// Block until the data is delivered (or the conn closes).
+					// Never drop: this rides a reliable transport, so dropping a
+					// DATA frame silently corrupts the sub-stream. A slow reader
+					// applies backpressure to the whole conn (head-of-line
+					// blocking) — the correct tradeoff until per-stream flow
+					// control (window frames) is added.
 					select {
 					case s.readBuf <- frame.Payload:
-					default:
-						// Buffer full, drop (backpressure)
+					case <-sc.stopCh:
+						return
 					}
 				}
 			}

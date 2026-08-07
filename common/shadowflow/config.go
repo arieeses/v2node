@@ -155,6 +155,8 @@ func ParseFromCommonNode(camouflage string, shapingSettingsRaw json.RawMessage,
 		var shaping ShapingConfig
 		if err := json.Unmarshal(shapingSettingsRaw, &shaping); err == nil {
 			config.Shaping = &shaping
+		} else {
+			log.WithError(err).Warn("ShadowFlow: invalid shaping_settings JSON, using defaults")
 		}
 	}
 
