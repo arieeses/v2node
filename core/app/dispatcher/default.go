@@ -150,6 +150,20 @@ func (*DefaultDispatcher) Close() error { return nil }
 
 func (d *DefaultDispatcher) getLink(ctx context.Context) (*transport.Link, *transport.Link, *limiter.Limiter, error) {
 	opt := pipe.OptionsFromContext(ctx)
+	// anytls multiplexes every user stream onto ONE TCP connection, but its wire
+	// protocol carries NO per-stream flow control (only SYN/PSH/FIN — no window or
+	// credit frames). The single frame reader therefore backpressures by BLOCKING
+	// on the pipe write, which freezes EVERY other stream on that mux (head-of-line)
+	// the moment one stream's target drains slowly. The lean 4KB policy buffer
+	// (correct for per-connection trojan/ss) makes that freeze trigger almost
+	// instantly on a lossy path — the user sees anytls "stall / need many
+	// refreshes" while trojan on the same box stays fine. Give anytls a much larger
+	// pipe so transient bursts (e.g. a lossy relay path recovering lost packets)
+	// drain before the reader HOL-blocks. The ceiling only fills for a genuinely
+	// stuck stream, so idle memory is unchanged; per-connection protocols keep 4KB.
+	if inb := session.InboundFromContext(ctx); inb != nil && inb.Name == "anytls" {
+		opt = append(opt, pipe.WithSizeLimit(128*1024))
+	}
 	uplinkReader, uplinkWriter := pipe.New(opt...)
 	downlinkReader, downlinkWriter := pipe.New(opt...)
 

@@ -149,7 +149,18 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string, disableSniffing bool, li
 		// deliberate balance: fast enough to clear relays that rotated their IP
 		// away, but long enough to tolerate transient stalls on a lossy AWS path
 		// so a slow-but-alive transfer is not cut prematurely.
-		in.StreamSetting.SocketSettings.TCPUserTimeout = 90000
+		//
+		// EXCEPT anytls: it multiplexes every user stream onto ONE TCP
+		// connection, so aborting that connection on a transient lossy stall
+		// tears down the WHOLE session (all streams) at once — users see it as
+		// "anytls keeps dropping / needs many refreshes". Give the anytls mux the
+		// kernel's full retransmission budget (tcp_retries2, ~15min) to ride out
+		// loss; keepalive above still reaps a genuinely dead peer. Per-connection
+		// protocols (trojan/vless/ss) keep the 90s abort — losing one connection
+		// there is just one failed request, not the whole session.
+		if nodeInfo.Type != "anytls" {
+			in.StreamSetting.SocketSettings.TCPUserTimeout = 90000
+		}
 	}
 	// Set server port. A shadow-tls node rebinds the real SS inbound to a
 	// loopback port (portOverride); sing-box owns the public server_port.
@@ -211,6 +222,16 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string, disableSniffing bool, li
 						CertFile:     nodeInfo.Common.CertInfo.CertFile,
 						KeyFile:      nodeInfo.Common.CertInfo.KeyFile,
 						OcspStapling: 0,
+						// OneTimeLoading MUST be true. Otherwise xray's
+						// BuildCertificates spawns a setupOcspTicker goroutine per
+						// certificate that loops forever with NO stop channel (it only
+						// returns when OneTimeLoading is set). Every node sync rebuilds
+						// this TLS inbound, so a new immortal ticker leaks each time,
+						// each pinning the parsed cert + config in the heap — thousands
+						// accumulate (observed 2601 tickers / ~510MB live heap on a box
+						// "nobody was using"). We reload certs by rebuilding the inbound
+						// on sync anyway, so the ticker's hot-reload is pure redundancy.
+						OneTimeLoading: true,
 					},
 				},
 				RejectUnknownSNI: nodeInfo.Common.CertInfo.RejectUnknownSni,
@@ -643,10 +664,18 @@ func buildAnyTLS(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig
 	settings := &coreConf.AnyTLSServerConfig{
 		PaddingScheme: v.PaddingScheme,
 	}
-	t := coreConf.TransportProtocol(v.Network)
+	// UniProxy anytls nodes often carry no network field; an empty
+	// TransportProtocol makes xray reject the inbound with "unknown transport
+	// protocol" (trojan/ss already default to tcp — anytls did not). Default to
+	// tcp, matching xray's own default when StreamSetting is absent.
+	network := v.Network
+	if network == "" {
+		network = "tcp"
+	}
+	t := coreConf.TransportProtocol(network)
 	inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
 	if len(v.NetworkSettings) != 0 {
-		switch v.Network {
+		switch network {
 		case "tcp":
 			err := json.Unmarshal(v.NetworkSettings, &inbound.StreamSetting.TCPSettings)
 			if err != nil {
