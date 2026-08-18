@@ -512,6 +512,26 @@ install_haproxy() {
     mkdir -p /etc/haproxy
     [ -f /etc/haproxy/haproxy.cfg ] && cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.bak
 
+    # 私有配置源：给了 URL 就从你的私有仓/gist/服务器拉取真实的 haproxy.cfg + sni.map
+    # （含落地信息，绝不进这个公开脚本）。URL 来源优先级：参数 $1 > 环境变量 HAPROXY_CFG_URL >
+    # 交互输入；留空则写下面的通用占位骨架。会拉取 <URL>/haproxy.cfg 和 <URL>/sni.map。
+    local src="${1:-$HAPROXY_CFG_URL}"
+    if [ -z "$src" ]; then
+        read -rp "私有配置源URL基址(留空=写通用骨架): " src
+    fi
+    local from_private=0
+    if [ -n "$src" ]; then
+        src="${src%/}"
+        if curl -fsSL "$src/haproxy.cfg" -o /etc/haproxy/haproxy.cfg \
+           && curl -fsSL "$src/sni.map" -o /etc/haproxy/sni.map; then
+            echo -e "${green}已从私有源拉取 haproxy.cfg + sni.map${plain}"
+            from_private=1
+        else
+            echo -e "${red}私有源拉取失败，回退到通用占位骨架${plain}"
+        fi
+    fi
+
+    if [ "$from_private" != "1" ]; then
     # 检测版本决定 keepalive 写法：2.4+ 用 clitcpka-idle/intvl/cnt，旧版(如 Debian11 的 2.2)走 sysctl
     local ver ka
     ver=$(haproxy -v 2>/dev/null | grep -oiE '[0-9]+\.[0-9]+' | head -1)
@@ -595,6 +615,7 @@ node6.example.com   be_node6
 node7.example.com   be_node7
 node8.example.com   be_node8
 MAP
+    fi
     fi
 
     # 校验并启动
@@ -734,7 +755,7 @@ if [[ $# > 0 ]]; then
         "uninstall") check_install 0 && uninstall 0 ;;
         "version") check_install 0 && show_v2node_version 0 ;;
         "update_shell") update_shell ;;
-        "haproxy") install_haproxy ;;
+        "haproxy") install_haproxy "$2" ;;
         "haproxy-start") start_haproxy ;;
         "haproxy-stop") stop_haproxy ;;
         "haproxy-restart") restart_haproxy ;;
