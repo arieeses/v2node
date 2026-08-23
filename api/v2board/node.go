@@ -48,6 +48,10 @@ type CommonNode struct {
 	//shadowsocks
 	Cipher    string `json:"cipher"`
 	ServerKey string `json:"server_key"`
+	// simple-obfs "tls" front (panel natively emits obfs=http; the tls mode is
+	// a backend extension). Filled by parseCommon, not sent verbatim by panel.
+	SsObfs     string `json:"-"`
+	SsObfsHost string `json:"-"`
 	//tuic
 	CongestionControl string `json:"congestion_control"`
 	ZeroRTTHandshake  bool   `json:"zero_rtt_handshake"`
@@ -163,7 +167,8 @@ func (c *Client) getNodeInfoV2(ctx context.Context) (node *NodeInfo, err error) 
 	case "vmess", "trojan", "anytls", "vless", "shadowflow":
 		node.Type = cm.Protocol
 		node.Security = cm.Tls
-	case "shadowsocks":
+	case "shadowsocks", "mieru":
+		// mieru: no Xray TLS layer; the mieru Mux handles its own encryption.
 		node.Type = cm.Protocol
 		node.Security = 0
 	default:
@@ -254,6 +259,12 @@ func parseUniProxyConfig(body []byte, proto string) (*CommonNode, error) {
 			if alt.Obfs == "http" && (alt.ObfsSettings.Path != "" || alt.ObfsSettings.Host != "") {
 				ns, _ := json.Marshal(map[string]string{"path": alt.ObfsSettings.Path, "Host": alt.ObfsSettings.Host})
 				cm.NetworkSettings = ns
+			} else if alt.Obfs == "tls" {
+				// simple-obfs tls: handled by a native front on the public port,
+				// not an Xray stream setting. NetworkSettings stays empty so the
+				// SS inbound is plain on its loopback port.
+				cm.SsObfs = "tls"
+				cm.SsObfsHost = alt.ObfsSettings.Host
 			}
 		}
 	}
@@ -412,6 +423,56 @@ func (c *CommonNode) ShadowsocksPlugin() *SSPlugin {
 func (c *CommonNode) ShadowTLSEnabled() bool {
 	p := c.ShadowsocksPlugin()
 	return p != nil && p.Name == "shadow-tls" && p.Opt("host") != "" && p.Opt("password") != ""
+}
+
+// SimpleObfsEnabled reports whether this SS node is a simple-obfs node handled
+// by the native front (mode "tls" or "http").
+func (c *CommonNode) SimpleObfsEnabled() bool {
+	return c.SimpleObfsMode() != ""
+}
+
+// SimpleObfsMode returns the configured simple-obfs mode ("tls"/"http"), or ""
+// if this is not a simple-obfs node. The node runs strictly this mode — there
+// is no auto-detection or cross-mode fallback.
+func (c *CommonNode) SimpleObfsMode() string {
+	m, _ := c.simpleObfs()
+	return m
+}
+
+// SimpleObfsHost returns the fake host configured for the obfs front
+// (informational; simple-obfs does not validate it server-side).
+func (c *CommonNode) SimpleObfsHost() string {
+	_, h := c.simpleObfs()
+	return h
+}
+
+// simpleObfs reads the simple-obfs mode+host from either the backend-extension
+// field (SsObfs, set on the UniProxy path) or, as the panel sends it on the
+// /api/v2 path, network_settings {"mode":"tls|http","Host":"..."}.
+func (c *CommonNode) simpleObfs() (mode, host string) {
+	if m := strings.ToLower(c.SsObfs); m == "tls" || m == "http" {
+		return m, c.SsObfsHost
+	}
+	if len(c.NetworkSettings) == 0 {
+		return "", ""
+	}
+	var ns struct {
+		Mode    string `json:"mode"`
+		Host    string `json:"Host"`
+		HostLow string `json:"host"`
+	}
+	if err := json.Unmarshal(c.NetworkSettings, &ns); err != nil {
+		return "", ""
+	}
+	m := strings.ToLower(ns.Mode)
+	if m != "tls" && m != "http" {
+		return "", ""
+	}
+	h := ns.Host
+	if h == "" {
+		h = ns.HostLow
+	}
+	return m, h
 }
 
 func (t TlsSettings) PrimaryServerName() string {

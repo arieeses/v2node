@@ -64,6 +64,16 @@ func (vc *V2Core) GetUserUUIDs(tag string) map[string]struct{} {
 }
 
 func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo) error {
+	// mieru node: drop users from the Runner (atomic re-register) + uidMap.
+	if vc.mieru.Has(tag) {
+		uuids := make([]string, 0, len(users))
+		for i := range users {
+			uuids = append(uuids, users[i].Uuid)
+			vc.users.uidMap.Delete(format.UserTag(tag, users[i].Uuid))
+		}
+		vc.mieru.DelUsers(tag, uuids)
+		return nil
+	}
 	userManager, err := vc.GetUserManager(tag)
 	if err != nil {
 		return fmt.Errorf("get user manager error: %s", err)
@@ -162,6 +172,15 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	// Update uidMap first (lock-free sync.Map operations)
 	for i := range p.Users {
 		v.users.uidMap.Store(format.UserTag(p.Tag, p.Users[i].Uuid), p.Users[i].Id)
+	}
+	// mieru: users are held by the mieru Runner and hot-updated atomically; no
+	// Xray user manager involved. uidMap above is still populated so traffic
+	// (counted by email = UserTag) resolves back to the UID on report.
+	if p.NodeInfo.Type == "mieru" {
+		if err := v.mieru.AddUsers(p.Tag, p.Users); err != nil {
+			return 0, err
+		}
+		return len(p.Users), nil
 	}
 	var users []*protocol.User
 	switch p.NodeInfo.Type {

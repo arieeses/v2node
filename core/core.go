@@ -5,6 +5,8 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	panel "github.com/wyx2685/v2node/api/v2board"
+	"github.com/wyx2685/v2node/common/mieru"
+	"github.com/wyx2685/v2node/common/obfs"
 	"github.com/wyx2685/v2node/common/singbox"
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core/app/dispatcher"
@@ -36,6 +38,8 @@ type V2Core struct {
 	ohm        outbound.Manager
 	dispatcher *dispatcher.DefaultDispatcher
 	singbox    *singbox.Manager
+	mieru      *mieru.Manager
+	obfs       *obfs.Manager
 }
 
 type UserMap struct {
@@ -50,6 +54,8 @@ func New(config *conf.Conf) *V2Core {
 			config.Global.EffectiveSingBoxPath(),
 			config.Global.EffectiveSingBoxDir(),
 		),
+		mieru: mieru.NewManager(),
+		obfs:  obfs.NewManager(),
 	}
 	return core
 }
@@ -64,6 +70,7 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 	v.ihm = v.Server.GetFeature(inbound.ManagerType()).(inbound.Manager)
 	v.ohm = v.Server.GetFeature(outbound.ManagerType()).(outbound.Manager)
 	v.dispatcher = v.Server.GetFeature(routing.DispatcherType()).(*dispatcher.DefaultDispatcher)
+	v.mieru.SetDispatcher(v.dispatcher)
 	return nil
 }
 
@@ -72,6 +79,12 @@ func (v *V2Core) Close() error {
 	defer v.access.Unlock()
 	if v.singbox != nil {
 		v.singbox.StopAll()
+	}
+	if v.mieru != nil {
+		v.mieru.CloseAll()
+	}
+	if v.obfs != nil {
+		v.obfs.StopAll()
 	}
 	v.Config = nil
 	v.ihm = nil

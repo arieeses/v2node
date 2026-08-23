@@ -547,6 +547,24 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 		}
 		// Unknown plugin: fall through to a plain SS inbound.
 	}
+	// simple-obfs (tls/http): the public port is owned by a native obfs front
+	// that peels the framing; this inbound is plain SS on a loopback port, so
+	// skip the HTTP-obfs stream settings (network_settings.Host would otherwise
+	// wrongly enable Xray's http-header masquerade).
+	if s.SimpleObfsEnabled() {
+		// Force plain TCP on the loopback inbound. The panel sends network:"http"
+		// for this node (it is the obfs mode marker, not a real Xray transport);
+		// letting buildInbound default StreamSetting to that would wrongly wrap
+		// the loopback SS in an h2 transport the native front never speaks.
+		t := coreConf.TransportProtocol("tcp")
+		inbound.StreamSetting = &coreConf.StreamConfig{Network: &t}
+		sets, err := json.Marshal(settings)
+		if err != nil {
+			return fmt.Errorf("marshal shadowsocks settings error: %s", err)
+		}
+		inbound.Settings = (*json.RawMessage)(&sets)
+		return nil
+	}
 	// Only set StreamSetting when NetworkSettings is configured
 	if len(s.NetworkSettings) != 0 {
 		shttp := &ShadowsocksHTTPNetworkSettings{}
