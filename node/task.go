@@ -3,8 +3,7 @@ package node
 import (
 	"context"
 	"fmt"
-	"os"
-	"strings"
+	"net"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -261,18 +260,17 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 		c.reconcileUsers(c.userList)
 	}
 
-	// Listener presence check: confirm the kernel still has our port in its
-	// socket table (TCP LISTEN, or a bound UDP socket for hysteria2/tuic). This
-	// reads /proc/net directly instead of dialing, so it CANNOT produce false
-	// positives from transient load, dial timeouts, or a mismatched probe
-	// address — the port is either in the kernel table or it isn't. We do not
-	// test external reachability (that is the firewall's responsibility); we
-	// only detect the case where our own listener silently went away.
+	// Listener presence check: confirm our port is still held by a listener
+	// (TCP) or bound socket (UDP for hysteria2/tuic). portBound probes by trying
+	// to bind the port, which is environment-independent (works inside OpenVZ,
+	// where /proc/net parsing gave false "missing" and drove a rebuild loop). We
+	// do not test external reachability (that is the firewall's responsibility);
+	// we only detect the case where our own listener silently went away.
 	if c.info != nil && c.info.Common != nil && c.info.Common.ServerPort > 0 {
 		udp := c.info.Type == "hysteria2" || c.info.Type == "tuic"
 		if !portBound(int(c.info.Common.ServerPort), udp) {
 			// Require two consecutive misses before the destructive rebuild, as a
-			// guard against a momentarily unreadable /proc.
+			// guard against a momentary bind-probe failure.
 			c.portFailCount++
 			if c.portFailCount < 2 {
 				log.WithFields(log.Fields{
@@ -313,42 +311,35 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	return nil
 }
 
-// portBound reports whether the kernel currently holds a socket on the given
-// local port: a TCP socket in LISTEN state, or — for UDP protocols like
-// hysteria2/tuic — any bound UDP socket. It parses /proc/net/{tcp,tcp6} (or
-// /proc/net/{udp,udp6}) rather than dialing, so the answer is exact and
-// instantaneous: no network round-trip, no timeout, no false positive from
-// load or a wrong probe address. The bind IP is intentionally ignored — we
-// match on port alone, so a node listening on ::, 0.0.0.0 or a specific IP is
-// all detected the same way.
+// portBound reports whether the given local port is already held by a listener
+// (TCP) or a bound socket (UDP). It probes by attempting to bind the port
+// rather than parsing /proc/net/tcp{,6}: inside OpenVZ containers /proc/net/tcp6
+// is frequently ABSENT and /proc/net/tcp does not list the container's own
+// wildcard ([::]) listeners, so the /proc approach reported a live listener as
+// "missing" and drove an endless destructive DelNode/AddNode rebuild loop —
+// leaking per-inbound background goroutines (anytls userUpdaterLoop, ss
+// AttackDefense cleanupLoop, the TLS OCSP ticker) and dropping every connection
+// on each cycle. A bind probe is environment-independent: if the port is held,
+// bind fails with EADDRINUSE and we report present; only a clean, successful
+// bind (port genuinely free) reports missing. Binding 0.0.0.0 also conflicts
+// with a wildcard/[::] or specific-IP listener on the same port, so it detects
+// them all. ANY bind error is treated as "present" so a transient failure can
+// never trigger the destructive rebuild.
 func portBound(port int, udp bool) bool {
-	files := []string{"/proc/net/tcp", "/proc/net/tcp6"}
+	addr := fmt.Sprintf("0.0.0.0:%d", port)
 	if udp {
-		files = []string{"/proc/net/udp", "/proc/net/udp6"}
-	}
-	target := fmt.Sprintf("%04X", port) // /proc encodes the local port as uppercase hex
-	for _, f := range files {
-		data, err := os.ReadFile(f)
+		c, err := net.ListenPacket("udp", addr)
 		if err != nil {
-			continue
+			return true // held (or un-probeable) — never rebuild on uncertainty
 		}
-		for _, line := range strings.Split(string(data), "\n") {
-			fields := strings.Fields(line)
-			if len(fields) < 4 {
-				continue // header row or blank line
-			}
-			local := strings.Split(fields[1], ":") // local_address = "HEXIP:HEXPORT"
-			if len(local) != 2 || local[1] != target {
-				continue
-			}
-			if udp {
-				return true // a bound UDP socket on this port is enough
-			}
-			if fields[3] == "0A" { // 0x0A = TCP_LISTEN
-				return true
-			}
-		}
+		_ = c.Close()
+		return false
 	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return true
+	}
+	_ = l.Close()
 	return false
 }
 
