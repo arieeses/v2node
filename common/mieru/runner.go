@@ -2,6 +2,7 @@ package mieru
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/enfein/mieru/v3/apis/trafficpattern"
 	mcommon "github.com/enfein/mieru/v3/pkg/common"
 	mlog "github.com/enfein/mieru/v3/pkg/log"
+	mmetrics "github.com/enfein/mieru/v3/pkg/metrics"
 	mprotocol "github.com/enfein/mieru/v3/pkg/protocol"
 
 	log "github.com/sirupsen/logrus"
@@ -31,6 +33,21 @@ func init() {
 	// own logging through a NilFormatter so it stays silent — v2node does its
 	// own logging via logrus.
 	mlog.SetFormatter(&mlog.NilFormatter{})
+	// We do our own per-user accounting via the Xray dispatcher and never read
+	// mieru's metrics, so stop its periodic metrics dump goroutine.
+	mmetrics.DisableMetricsDump()
+}
+
+// preRegisterUserMetrics registers a user's mieru upload/download counters as
+// plain COUNTERs BEFORE mieru's session code would register them as
+// COUNTER_TIME_SERIES. RegisterMetric is LoadOrStore, so mieru then reuses our
+// plain counters — critical because a time-series counter appends a protobuf
+// History object on EVERY write (counter.go), which under load allocates
+// millions of objects, spiking GC/CPU and RSS. We never read these counters.
+func preRegisterUserMetrics(uuid string) {
+	grp := fmt.Sprintf(mmetrics.UserMetricGroupFormat, uuid)
+	mmetrics.RegisterMetric(grp, mmetrics.UserMetricUploadBytes, mmetrics.COUNTER)
+	mmetrics.RegisterMetric(grp, mmetrics.UserMetricDownloadBytes, mmetrics.COUNTER)
 }
 
 // Runner owns one mieru server (a protocol.Mux) for a node tag and bridges its
@@ -83,6 +100,9 @@ func (r *Runner) AddUsers(users []panel.UserInfo) error {
 	defer r.mu.Unlock()
 	for i := range users {
 		r.users[users[i].Uuid] = users[i]
+		// Register plain counters up front so mieru's session code reuses them
+		// instead of building a per-write time series (huge alloc under load).
+		preRegisterUserMetrics(users[i].Uuid)
 	}
 	if r.mux == nil {
 		if len(r.users) == 0 {
