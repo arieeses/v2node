@@ -307,7 +307,7 @@ show_log() {
 }
 
 update_shell() {
-    wget -O /usr/bin/v2node -N --no-check-certificate https://raw.githubusercontent.com/clavin-dev/m2node/main/script/v2node.sh
+    wget -O /usr/bin/v2node -N --no-check-certificate https://raw.githubusercontent.com/arieeses/v2node/main/script/v2node.sh
     if [[ $? != 0 ]]; then
         echo ""
         echo -e "${red}下载脚本失败，请检查本机能否连接 Github${plain}"
@@ -657,6 +657,68 @@ restart_haproxy() {
     fi
 }
 
+optimize_network() {
+    echo -e "${green}正在为落地节点应用 BBR + 网络内核优化...${plain}"
+
+    # 1) 启用 BBR（部分内核需手动加载模块 + 持久化）
+    modprobe tcp_bbr 2>/dev/null
+    if grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+        echo "tcp_bbr" >/etc/modules-load.d/bbr.conf 2>/dev/null
+        echo -e "${green}内核支持 BBR ✓${plain}"
+    else
+        echo -e "${red}当前内核不支持 BBR（需 4.9+），BBR 项将不生效；其余参数仍会写入。${plain}"
+    fi
+
+    # 2) 写入 sysctl。落地节点特点：高并发 + 大量对外连接。
+    #    缓冲区刻意取适中(8MB)——大量连接×大buffer 会撑爆内存，你的机器内存偏紧。
+    cat >/etc/sysctl.d/99-v2node-net.conf <<'SYS'
+# ---- BBR 拥塞控制 ----
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+# ---- 连接扩容（落地高并发）----
+net.core.somaxconn = 32768
+net.ipv4.tcp_max_syn_backlog = 8192
+net.core.netdev_max_backlog = 16384
+fs.file-max = 1000000
+# ---- 对外连接端口 / 回收（落地大量出站）----
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+# ---- 握手 / 探测 ----
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_slow_start_after_idle = 0
+# ---- 缓冲区（适中 8MB 上限，兼顾吞吐与内存）----
+net.core.rmem_max = 8388608
+net.core.wmem_max = 8388608
+net.ipv4.tcp_rmem = 4096 87380 8388608
+net.ipv4.tcp_wmem = 4096 65536 8388608
+SYS
+    sysctl --system >/dev/null 2>&1
+
+    # 3) 文件描述符上限（高并发连接必须）
+    if ! grep -q "v2node-nofile" /etc/security/limits.conf 2>/dev/null; then
+        cat >>/etc/security/limits.conf <<'LIM'
+# v2node-nofile
+* soft nofile 1000000
+* hard nofile 1000000
+root soft nofile 1000000
+root hard nofile 1000000
+LIM
+    fi
+    mkdir -p /etc/systemd/system/v2node.service.d
+    cat >/etc/systemd/system/v2node.service.d/limits.conf <<'SVC'
+[Service]
+LimitNOFILE=1000000
+SVC
+    systemctl daemon-reload 2>/dev/null
+
+    # 4) 校验
+    echo -e "${green}已应用，当前生效值：${plain}"
+    sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc net.core.somaxconn 2>/dev/null | sed 's/^/  /'
+    echo -e "${yellow}提示：文件描述符上限对已运行的 v2node 需「重启 v2node」(菜单6) 后生效。${plain}"
+}
+
 show_usage() {
     echo "v2node 管理脚本使用方法: "
     echo "------------------------------------------"
@@ -707,11 +769,13 @@ show_menu() {
   ${green}18.${plain} 停止 HAProxy
   ${green}19.${plain} 重启 HAProxy
 ————————————————
+  ${green}20.${plain} BBR 网络优化（落地节点）
+————————————————
   ${green}15.${plain} 退出脚本
  "
  #后续更新可加入上方字符串中
     show_status
-    echo && read -rp "请输入选择 [0-19]: " num
+    echo && read -rp "请输入选择 [0-20]: " num
 
     case "${num}" in
         0) config ;;
@@ -734,7 +798,8 @@ show_menu() {
         17) start_haproxy ;;
         18) stop_haproxy ;;
         19) restart_haproxy ;;
-        *) echo -e "${red}请输入正确的数字 [0-19]${plain}" ;;
+        20) optimize_network ;;
+        *) echo -e "${red}请输入正确的数字 [0-20]${plain}" ;;
     esac
 }
 
@@ -759,6 +824,7 @@ if [[ $# > 0 ]]; then
         "haproxy-start") start_haproxy ;;
         "haproxy-stop") stop_haproxy ;;
         "haproxy-restart") restart_haproxy ;;
+        "bbr"|"optimize") optimize_network ;;
         *) show_usage
     esac
 else
