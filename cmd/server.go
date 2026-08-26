@@ -11,6 +11,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/wyx2685/v2node/common/memtune"
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core"
 	"github.com/wyx2685/v2node/limiter"
@@ -41,6 +42,13 @@ func init() {
 
 func serverHandle(_ *cobra.Command, _ []string) {
 	showVersion()
+	// Cap steady-state RSS on busy multi-user nodes: auto-set GOMEMLIMIT from the
+	// detected machine/cgroup memory so the GC returns pages before an OOM kill.
+	memtune.Apply()
+	// Return freed heap to the OS periodically so RSS falls back down after a
+	// traffic peak instead of lingering at the high-water mark (Go's own
+	// scavenger does this only lazily). Interval via V2NODE_MEM_SCAVENGE_SEC.
+	memtune.StartScavenger()
 	c := conf.New()
 	err := c.LoadFromPath(config)
 	log.SetFormatter(&log.TextFormatter{

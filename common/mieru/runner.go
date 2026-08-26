@@ -79,10 +79,14 @@ func (r *Runner) startLocked() error {
 	if err != nil {
 		return err
 	}
+	// Whether to require a user hint on every connection. Defaults ON (rejects
+	// hint-less junk before the costly per-user trial-decrypt); operators with
+	// clients that don't send a hint can disable it via network_settings. See
+	// forceUserHint.
 	mux := mprotocol.NewMux(false)
 	mux.SetTrafficPattern(tp).
 		SetServerUsers(buildUserMap(r.users)).
-		SetServerUserHintIsMandatory(false)
+		SetServerUserHintIsMandatory(forceUserHint(r.info))
 	mux.SetEndpoints(endpoints)
 	if err := mux.Start(); err != nil {
 		return err

@@ -23,6 +23,13 @@ import (
 type mieruNS struct {
 	Transport      string `json:"transport"`
 	TrafficPattern string `json:"traffic_pattern"`
+	// ForceUserHint / UserHintMandatory both map to mieru's
+	// SetServerUserHintIsMandatory. Two keys are accepted so either a
+	// soga-style panel field (mieru_force_user_hint) or a heki-style one
+	// (user_hint_mandatory) works. Pointers so "unset" is distinguishable from
+	// an explicit false. See forceUserHint for the default.
+	ForceUserHint     *bool `json:"mieru_force_user_hint"`
+	UserHintMandatory *bool `json:"user_hint_mandatory"`
 }
 
 func parseNS(raw json.RawMessage) mieruNS {
@@ -31,6 +38,28 @@ func parseNS(raw json.RawMessage) mieruNS {
 		_ = json.Unmarshal(raw, &ns)
 	}
 	return ns
+}
+
+// forceUserHint decides whether mieru requires every connection to carry a user
+// hint. With it ON, hint-less junk (scanners, probes, relay-pool noise) is
+// rejected before the expensive per-user trial-decrypt (XChaCha20 against every
+// registered user's key) — the single biggest CPU sink on a busy multi-user
+// node. Modern mieru clients always send the hint.
+//
+// Default is ON (true): v2node is performance-oriented and this is the multi-
+// user optimization. Operators with old/third-party clients that do NOT send a
+// hint can opt out by setting "mieru_force_user_hint": false (or
+// "user_hint_mandatory": false) in the node's network_settings — those clients
+// would otherwise be unable to connect.
+func forceUserHint(info *panel.NodeInfo) bool {
+	ns := parseNS(info.Common.NetworkSettings)
+	if ns.ForceUserHint != nil {
+		return *ns.ForceUserHint
+	}
+	if ns.UserHintMandatory != nil {
+		return *ns.UserHintMandatory
+	}
+	return true
 }
 
 // buildEndpoints maps the panel node (server_port + transport) into mieru
