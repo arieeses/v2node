@@ -74,7 +74,43 @@ grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null \
   && say "BBR 内核支持 ✓" || warn "当前内核不支持 BBR（需 4.9+），该项不生效，其余照常"
 
 # ───────────────────────── 2) 压缩内存 swap：zram 或 zswap ─────────────────────────
-if [ "$USE_ZSWAP" = "1" ]; then
+setup_zram() {
+  say "配置 zram: ${ZRAM_MB}MB (${ALGO}, 优先级100 高于磁盘swap)"
+  cat >/usr/local/sbin/v2node-zram.sh <<'ZS'
+#!/usr/bin/env bash
+SIZE_MB="$1"
+ALGO="${2:-lz4}"
+modprobe zram 2>/dev/null
+# 幂等：先卸载重建 zram0
+swapoff /dev/zram0 2>/dev/null || true
+if [ -e /sys/block/zram0/reset ]; then echo 1 > /sys/block/zram0/reset 2>/dev/null || true; fi
+# 设压缩算法；内核不支持该算法则回退 lz4
+echo "$ALGO" > /sys/block/zram0/comp_algorithm 2>/dev/null || echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+echo "${SIZE_MB}M" > /sys/block/zram0/disksize
+mkswap /dev/zram0 >/dev/null 2>&1
+swapon -p 100 /dev/zram0
+# THP 顺带设 madvise（防止大页膨胀 RSS）
+echo madvise > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
+ZS
+  chmod +x /usr/local/sbin/v2node-zram.sh
+  cat >/etc/systemd/system/v2node-zram.service <<EOF
+[Unit]
+Description=v2node zram swap + THP madvise
+After=multi-user.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/v2node-zram.sh ${ZRAM_MB} ${ALGO}
+ExecStop=/bin/bash -c 'swapoff /dev/zram0 2>/dev/null; echo 1 > /sys/block/zram0/reset 2>/dev/null || true'
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable v2node-zram.service >/dev/null 2>&1
+  systemctl restart v2node-zram.service && say "zram 已启用 ✓" || warn "zram 启用失败（内核可能无 zram 模块）"
+}
+
+if [ "$USE_ZSWAP" = "1" ] && [ -e /sys/module/zswap/parameters/enabled ]; then
   say "配置 zswap: ${ZSWAP_COMP} + zsmalloc + shrinker + pool20%（磁盘swap前的压缩缓存，冷页回写磁盘）"
   systemctl disable --now v2node-zram.service 2>/dev/null || true
   swapoff /dev/zram0 2>/dev/null || true
@@ -104,43 +140,20 @@ EOF
   systemctl daemon-reload
   systemctl enable v2node-zswap.service >/dev/null 2>&1
   systemctl restart v2node-zswap.service
-  [ "$(cat /sys/module/zswap/parameters/enabled 2>/dev/null)" = "Y" ] \
-    && say "zswap 已启用 ✓ (comp=$(cat /sys/module/zswap/parameters/compressor 2>/dev/null), pool=$(cat /sys/module/zswap/parameters/max_pool_percent 2>/dev/null)%, shrinker=$(cat /sys/module/zswap/parameters/shrinker_enabled 2>/dev/null))" \
-    || warn "zswap 启用失败（内核可能未编译 CONFIG_ZSWAP，请确认已有磁盘 swap）"
+  if [ "$(cat /sys/module/zswap/parameters/enabled 2>/dev/null)" = "Y" ]; then
+    say "zswap 已启用 ✓ (comp=$(cat /sys/module/zswap/parameters/compressor 2>/dev/null), pool=$(cat /sys/module/zswap/parameters/max_pool_percent 2>/dev/null)%, shrinker=$(cat /sys/module/zswap/parameters/shrinker_enabled 2>/dev/null))"
+  else
+    warn "zswap 开启失败，自动回退 zram"
+    systemctl disable --now v2node-zswap.service 2>/dev/null || true
+    USE_ZSWAP=0
+    setup_zram
+  fi
 else
-  say "配置 zram: ${ZRAM_MB}MB (${ALGO}, 优先级100 高于磁盘swap)"
-cat >/usr/local/sbin/v2node-zram.sh <<'ZS'
-#!/usr/bin/env bash
-SIZE_MB="$1"
-ALGO="${2:-lz4}"
-modprobe zram 2>/dev/null
-# 幂等：先卸载重建 zram0
-swapoff /dev/zram0 2>/dev/null || true
-if [ -e /sys/block/zram0/reset ]; then echo 1 > /sys/block/zram0/reset 2>/dev/null || true; fi
-# 设压缩算法；内核不支持该算法则回退 lz4
-echo "$ALGO" > /sys/block/zram0/comp_algorithm 2>/dev/null || echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true
-echo "${SIZE_MB}M" > /sys/block/zram0/disksize
-mkswap /dev/zram0 >/dev/null 2>&1
-swapon -p 100 /dev/zram0
-# THP 顺带设 madvise（防止大页膨胀 RSS）
-echo madvise > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
-ZS
-chmod +x /usr/local/sbin/v2node-zram.sh
-cat >/etc/systemd/system/v2node-zram.service <<EOF
-[Unit]
-Description=v2node zram swap + THP madvise
-After=multi-user.target
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/sbin/v2node-zram.sh ${ZRAM_MB} ${ALGO}
-ExecStop=/bin/bash -c 'swapoff /dev/zram0 2>/dev/null; echo 1 > /sys/block/zram0/reset 2>/dev/null || true'
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload
-systemctl enable v2node-zram.service >/dev/null 2>&1
-  systemctl restart v2node-zram.service && say "zram 已启用 ✓" || warn "zram 启用失败（内核可能无 zram 模块）"
+  if [ "$USE_ZSWAP" = "1" ]; then
+    warn "本机内核无 zswap（无 /sys/module/zswap），自动回退 zram"
+    USE_ZSWAP=0
+  fi
+  setup_zram
 fi
 
 # ───────────────────────── 3) 文件描述符上限 ─────────────────────────
