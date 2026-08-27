@@ -22,17 +22,21 @@ elif [ "$RAM_MB" -le 1400 ]; then BUF=8388608;  MEM_PCT=80   # ~1GB
 else                             BUF=16777216; MEM_PCT=82   # 2GB+
 fi
 # 激进模式：AGGRESSIVE=1（仅在 CPU 有余量的机器上用！zstd/低GOGC 会加 CPU）
-ALGO=lz4; GOGC_LINE=""; ZRAM_FACTOR=100; MODE=普通
+# swap 方案：默认 zram；ZSWAP=1 改用 zswap（压缩缓存 + 冷页回写磁盘，CPU 通常更低）
+USE_ZSWAP=${ZSWAP:-0}
+ALGO=lz4; ZSWAP_COMP=lz4; GOGC_LINE=""; ZRAM_FACTOR=100; SWAPPINESS=100; MODE=普通
 if [ "${AGGRESSIVE:-0}" = "1" ]; then
-  ALGO=zstd                            # 压缩率更高 → 换出更多有效内存（更吃 CPU）
+  ALGO=zstd; ZSWAP_COMP=zstd           # 压缩率更高 → 换出更多有效内存（更吃 CPU）
   ZRAM_FACTOR=150                      # zram 提到 150% 内存
   MEM_PCT=$(( MEM_PCT - 8 ))           # GOMEMLIMIT 再收紧 8 个点
   GOGC_LINE="Environment=GOGC=50"      # GC 更积极 → 堆更小 → RSS 更低
+  SWAPPINESS=150                       # 更积极换页（老内核会自动截到100）
   MODE=激进
 fi
 ZRAM_MB=$(( RAM_MB * ZRAM_FACTOR / 100 ))   # zram 设备大小（磁盘 swap 兜底溢出）
 GOMEM_MB=$(( RAM_MB * MEM_PCT / 100 ))
-say "模式: ${MODE}  (算法 ${ALGO}, zram ${ZRAM_FACTOR}% = ${ZRAM_MB}MB)"
+[ "$USE_ZSWAP" = "1" ] && SWAP_KIND=zswap || SWAP_KIND=zram
+say "模式: ${MODE}  swap方案: ${SWAP_KIND}  (GOMEMLIMIT=${GOMEM_MB}MiB, swappiness=${SWAPPINESS})"
 
 # ───────────────────────── 1) 内核参数：BBR + 连接 + vm ─────────────────────────
 say "写入内核参数 /etc/sysctl.d/99-v2node-tune.conf (缓冲上限 $((BUF/1024/1024))MB)"
@@ -60,8 +64,8 @@ net.core.rmem_max = ${BUF}
 net.core.wmem_max = ${BUF}
 net.ipv4.tcp_rmem = 4096 87380 ${BUF}
 net.ipv4.tcp_wmem = 4096 65536 ${BUF}
-# ==== 内存回收 / zram 配合 ====
-vm.swappiness = 100
+# ==== 内存回收 / swap 配合 ====
+vm.swappiness = ${SWAPPINESS}
 vm.page-cluster = 0
 vm.vfs_cache_pressure = 200
 EOF
@@ -69,8 +73,42 @@ sysctl --system >/dev/null 2>&1
 grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null \
   && say "BBR 内核支持 ✓" || warn "当前内核不支持 BBR（需 4.9+），该项不生效，其余照常"
 
-# ───────────────────────── 2) zram（开机自启，幂等）─────────────────────────
-say "配置 zram: ${ZRAM_MB}MB (${ALGO}, 优先级100 高于磁盘swap)"
+# ───────────────────────── 2) 压缩内存 swap：zram 或 zswap ─────────────────────────
+if [ "$USE_ZSWAP" = "1" ]; then
+  say "配置 zswap: ${ZSWAP_COMP} + zsmalloc + shrinker + pool20%（磁盘swap前的压缩缓存，冷页回写磁盘）"
+  systemctl disable --now v2node-zram.service 2>/dev/null || true
+  swapoff /dev/zram0 2>/dev/null || true
+  cat >/usr/local/sbin/v2node-zswap.sh <<ZW
+#!/usr/bin/env bash
+# zswap 与 zram 冲突，先确保 zram 关闭
+swapoff /dev/zram0 2>/dev/null || true
+echo 1 > /sys/module/zswap/parameters/enabled 2>/dev/null || true
+echo ${ZSWAP_COMP} > /sys/module/zswap/parameters/compressor 2>/dev/null || echo lz4 > /sys/module/zswap/parameters/compressor 2>/dev/null || true
+echo zsmalloc > /sys/module/zswap/parameters/zpool 2>/dev/null || true
+echo 20 > /sys/module/zswap/parameters/max_pool_percent 2>/dev/null || true
+echo Y > /sys/module/zswap/parameters/shrinker_enabled 2>/dev/null || true
+echo madvise > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
+ZW
+  chmod +x /usr/local/sbin/v2node-zswap.sh
+  cat >/etc/systemd/system/v2node-zswap.service <<EOF
+[Unit]
+Description=v2node zswap params + THP madvise
+After=multi-user.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/v2node-zswap.sh
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable v2node-zswap.service >/dev/null 2>&1
+  systemctl restart v2node-zswap.service
+  [ "$(cat /sys/module/zswap/parameters/enabled 2>/dev/null)" = "Y" ] \
+    && say "zswap 已启用 ✓ (comp=$(cat /sys/module/zswap/parameters/compressor 2>/dev/null), pool=$(cat /sys/module/zswap/parameters/max_pool_percent 2>/dev/null)%, shrinker=$(cat /sys/module/zswap/parameters/shrinker_enabled 2>/dev/null))" \
+    || warn "zswap 启用失败（内核可能未编译 CONFIG_ZSWAP，请确认已有磁盘 swap）"
+else
+  say "配置 zram: ${ZRAM_MB}MB (${ALGO}, 优先级100 高于磁盘swap)"
 cat >/usr/local/sbin/v2node-zram.sh <<'ZS'
 #!/usr/bin/env bash
 SIZE_MB="$1"
@@ -102,7 +140,8 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable v2node-zram.service >/dev/null 2>&1
-systemctl restart v2node-zram.service && say "zram 已启用 ✓" || warn "zram 启用失败（内核可能无 zram 模块）"
+  systemctl restart v2node-zram.service && say "zram 已启用 ✓" || warn "zram 启用失败（内核可能无 zram 模块）"
+fi
 
 # ───────────────────────── 3) 文件描述符上限 ─────────────────────────
 if ! grep -q "v2node-nofile" /etc/security/limits.conf 2>/dev/null; then
@@ -135,7 +174,11 @@ fi
 echo
 say "========== 调优完成（${MODE}模式），当前状态 =========="
 echo -e "  拥塞控制: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)  qdisc: $(sysctl -n net.core.default_qdisc 2>/dev/null)"
-echo -e "  zram: ${ALGO} ${ZRAM_MB}MB   压缩比: $(zramctl /dev/zram0 --output DATA,COMPR 2>/dev/null | tail -1 | tr -s ' ' || echo n/a)"
+if [ "$USE_ZSWAP" = "1" ]; then
+  echo -e "  zswap: enabled=$(cat /sys/module/zswap/parameters/enabled 2>/dev/null) comp=$(cat /sys/module/zswap/parameters/compressor 2>/dev/null) pool=$(cat /sys/module/zswap/parameters/max_pool_percent 2>/dev/null)% shrinker=$(cat /sys/module/zswap/parameters/shrinker_enabled 2>/dev/null)"
+else
+  echo -e "  zram: ${ALGO} ${ZRAM_MB}MB   压缩比: $(zramctl /dev/zram0 --output DATA,COMPR 2>/dev/null | tail -1 | tr -s ' ' || echo n/a)"
+fi
 echo -e "  swappiness: $(sysctl -n vm.swappiness 2>/dev/null)  缓冲上限: $((BUF/1024/1024))MB"
 echo -e "  GOMEMLIMIT: ${GOMEM_MB}MiB"
 echo "  --- swap ---"; swapon --show 2>/dev/null
