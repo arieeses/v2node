@@ -17,9 +17,11 @@ RAM_MB=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
 say "检测到物理内存: ${RAM_MB} MB"
 
 # 按内存分档：小机器缓冲小、GOMEMLIMIT 收紧
-if   [ "$RAM_MB" -le 700 ]; then BUF=4194304;  MEM_PCT=78   # ~512MB
-elif [ "$RAM_MB" -le 1400 ]; then BUF=8388608;  MEM_PCT=80   # ~1GB
-else                             BUF=16777216; MEM_PCT=82   # 2GB+
+# GOMEMLIMIT 百分比：小机器必须留足内存给内核/系统，否则 Go 用太多会逼出
+# swap 颠簸（si/so 来回搬 = 60% 系统 CPU）。512 机器只给 55%，确保堆装进 RAM。
+if   [ "$RAM_MB" -le 700 ]; then BUF=4194304;  MEM_PCT=55   # ~512MB：留~210M给系统，防颠簸
+elif [ "$RAM_MB" -le 1400 ]; then BUF=8388608;  MEM_PCT=72   # ~1GB
+else                             BUF=16777216; MEM_PCT=80   # 2GB+
 fi
 # 激进模式：AGGRESSIVE=1（仅在 CPU 有余量的机器上用！zstd/低GOGC 会加 CPU）
 # swap 方案：默认优先 zswap（CPU 通常更低），内核不支持则自动回退 zram。ZSWAP=0 强制用 zram。
