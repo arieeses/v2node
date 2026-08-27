@@ -22,8 +22,8 @@ elif [ "$RAM_MB" -le 1400 ]; then BUF=8388608;  MEM_PCT=80   # ~1GB
 else                             BUF=16777216; MEM_PCT=82   # 2GB+
 fi
 # 激进模式：AGGRESSIVE=1（仅在 CPU 有余量的机器上用！zstd/低GOGC 会加 CPU）
-# swap 方案：默认 zram；ZSWAP=1 改用 zswap（压缩缓存 + 冷页回写磁盘，CPU 通常更低）
-USE_ZSWAP=${ZSWAP:-0}
+# swap 方案：默认优先 zswap（CPU 通常更低），内核不支持则自动回退 zram。ZSWAP=0 强制用 zram。
+USE_ZSWAP=${ZSWAP:-1}
 ALGO=lz4; ZSWAP_COMP=lz4; GOGC_LINE=""; ZRAM_FACTOR=100; SWAPPINESS=100; MODE=普通
 if [ "${AGGRESSIVE:-0}" = "1" ]; then
   ALGO=zstd; ZSWAP_COMP=zstd           # 压缩率更高 → 换出更多有效内存（更吃 CPU）
@@ -35,7 +35,7 @@ if [ "${AGGRESSIVE:-0}" = "1" ]; then
 fi
 ZRAM_MB=$(( RAM_MB * ZRAM_FACTOR / 100 ))   # zram 设备大小（磁盘 swap 兜底溢出）
 GOMEM_MB=$(( RAM_MB * MEM_PCT / 100 ))
-[ "$USE_ZSWAP" = "1" ] && SWAP_KIND=zswap || SWAP_KIND=zram
+[ "$USE_ZSWAP" = "1" ] && SWAP_KIND="优先zswap(无则回退zram)" || SWAP_KIND=zram
 say "模式: ${MODE}  swap方案: ${SWAP_KIND}  (GOMEMLIMIT=${GOMEM_MB}MiB, swappiness=${SWAPPINESS})"
 
 # ───────────────────────── 1) 内核参数：BBR + 连接 + vm ─────────────────────────
