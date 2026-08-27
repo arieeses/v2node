@@ -21,8 +21,18 @@ if   [ "$RAM_MB" -le 700 ]; then BUF=4194304;  MEM_PCT=78   # ~512MB
 elif [ "$RAM_MB" -le 1400 ]; then BUF=8388608;  MEM_PCT=80   # ~1GB
 else                             BUF=16777216; MEM_PCT=82   # 2GB+
 fi
-ZRAM_MB=$RAM_MB                       # zram 设备 = 100% 内存（压缩后实占约一半，磁盘swap兜底）
+# 激进模式：AGGRESSIVE=1（仅在 CPU 有余量的机器上用！zstd/低GOGC 会加 CPU）
+ALGO=lz4; GOGC_LINE=""; ZRAM_FACTOR=100; MODE=普通
+if [ "${AGGRESSIVE:-0}" = "1" ]; then
+  ALGO=zstd                            # 压缩率更高 → 换出更多有效内存（更吃 CPU）
+  ZRAM_FACTOR=150                      # zram 提到 150% 内存
+  MEM_PCT=$(( MEM_PCT - 8 ))           # GOMEMLIMIT 再收紧 8 个点
+  GOGC_LINE="Environment=GOGC=50"      # GC 更积极 → 堆更小 → RSS 更低
+  MODE=激进
+fi
+ZRAM_MB=$(( RAM_MB * ZRAM_FACTOR / 100 ))   # zram 设备大小（磁盘 swap 兜底溢出）
 GOMEM_MB=$(( RAM_MB * MEM_PCT / 100 ))
+say "模式: ${MODE}  (算法 ${ALGO}, zram ${ZRAM_FACTOR}% = ${ZRAM_MB}MB)"
 
 # ───────────────────────── 1) 内核参数：BBR + 连接 + vm ─────────────────────────
 say "写入内核参数 /etc/sysctl.d/99-v2node-tune.conf (缓冲上限 $((BUF/1024/1024))MB)"
@@ -60,15 +70,17 @@ grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null \
   && say "BBR 内核支持 ✓" || warn "当前内核不支持 BBR（需 4.9+），该项不生效，其余照常"
 
 # ───────────────────────── 2) zram（开机自启，幂等）─────────────────────────
-say "配置 zram: ${ZRAM_MB}MB (lz4, 优先级100 高于磁盘swap)"
+say "配置 zram: ${ZRAM_MB}MB (${ALGO}, 优先级100 高于磁盘swap)"
 cat >/usr/local/sbin/v2node-zram.sh <<'ZS'
 #!/usr/bin/env bash
 SIZE_MB="$1"
+ALGO="${2:-lz4}"
 modprobe zram 2>/dev/null
 # 幂等：先卸载重建 zram0
 swapoff /dev/zram0 2>/dev/null || true
 if [ -e /sys/block/zram0/reset ]; then echo 1 > /sys/block/zram0/reset 2>/dev/null || true; fi
-echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+# 设压缩算法；内核不支持该算法则回退 lz4
+echo "$ALGO" > /sys/block/zram0/comp_algorithm 2>/dev/null || echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true
 echo "${SIZE_MB}M" > /sys/block/zram0/disksize
 mkswap /dev/zram0 >/dev/null 2>&1
 swapon -p 100 /dev/zram0
@@ -83,7 +95,7 @@ After=multi-user.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/v2node-zram.sh ${ZRAM_MB}
+ExecStart=/usr/local/sbin/v2node-zram.sh ${ZRAM_MB} ${ALGO}
 ExecStop=/bin/bash -c 'swapoff /dev/zram0 2>/dev/null; echo 1 > /sys/block/zram0/reset 2>/dev/null || true'
 [Install]
 WantedBy=multi-user.target
@@ -110,6 +122,7 @@ if systemctl list-unit-files 2>/dev/null | grep -q '^v2node.service'; then
   cat >/etc/systemd/system/v2node.service.d/tune.conf <<EOF
 [Service]
 Environment=GOMEMLIMIT=${GOMEM_MB}MiB
+${GOGC_LINE}
 LimitNOFILE=1000000
 EOF
   systemctl daemon-reload
@@ -120,8 +133,9 @@ fi
 
 # ───────────────────────── 5) 汇总 ─────────────────────────
 echo
-say "========== 调优完成，当前状态 =========="
+say "========== 调优完成（${MODE}模式），当前状态 =========="
 echo -e "  拥塞控制: $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)  qdisc: $(sysctl -n net.core.default_qdisc 2>/dev/null)"
+echo -e "  zram: ${ALGO} ${ZRAM_MB}MB   压缩比: $(zramctl /dev/zram0 --output DATA,COMPR 2>/dev/null | tail -1 | tr -s ' ' || echo n/a)"
 echo -e "  swappiness: $(sysctl -n vm.swappiness 2>/dev/null)  缓冲上限: $((BUF/1024/1024))MB"
 echo -e "  GOMEMLIMIT: ${GOMEM_MB}MiB"
 echo "  --- swap ---"; swapon --show 2>/dev/null
