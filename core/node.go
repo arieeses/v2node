@@ -83,6 +83,9 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo, disableSniffing bool)
 }
 
 func (v *V2Core) DelNode(tag string) error {
+	// Free all per-tag state (SNI router, dispatcher counter/camouflage engine,
+	// shadowflow config) regardless of node type, so nothing leaks on churn.
+	v.cleanupNodeState(tag)
 	// mieru node: stop its Mux (no Xray inbound to remove).
 	if v.mieru.Has(tag) {
 		v.mieru.Del(tag)

@@ -22,6 +22,8 @@ import (
 	xnet "github.com/xtls/xray-core/common/net"
 	xproto "github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/session"
+	"github.com/xtls/xray-core/common/signal"
+	"github.com/xtls/xray-core/common/task"
 	"github.com/xtls/xray-core/features/routing"
 
 	panel "github.com/wyx2685/v2node/api/v2board"
@@ -37,6 +39,16 @@ func init() {
 	// mieru's metrics, so stop its periodic metrics dump goroutine.
 	mmetrics.DisableMetricsDump()
 }
+
+const (
+	// bridgeIdleTimeout reaps a bridged session idle in BOTH directions this
+	// long (matches xray's default ConnectionIdle).
+	bridgeIdleTimeout = 5 * time.Minute
+	// bridgeOneWayTimeout bounds the surviving direction after the other has
+	// closed (half-close), so a client that vanished with an idle target cannot
+	// pin the session (and its underlay) open.
+	bridgeOneWayTimeout = 5 * time.Second
+)
 
 // preRegisterUserMetrics registers a user's mieru upload/download counters as
 // plain COUNTERs BEFORE mieru's session code would register them as
@@ -187,7 +199,9 @@ func (r *Runner) handle(conn net.Conn) {
 	// Attach the node tag + user so the dispatcher counts traffic and applies
 	// speed/device limits under this user, exactly like the native protocols.
 	email := format.UserTag(r.tag, uuid)
-	ctx := session.ContextWithInbound(context.Background(), &session.Inbound{
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx = session.ContextWithInbound(ctx, &session.Inbound{
 		Tag:    r.tag,
 		Source: xnet.DestinationFromAddr(conn.RemoteAddr()),
 		Conn:   conn,
@@ -205,13 +219,33 @@ func (r *Runner) handle(conn net.Conn) {
 		return
 	}
 
-	// Bridge: uplink conn -> link.Writer, downlink link.Reader -> conn.
+	// Bridge conn <-> link with inactivity timeouts so a session cannot pin its
+	// underlay open forever. Without this, when a client went away (its half of
+	// the socks5 stream closed) but the target kept its side open, the downlink
+	// buf.Copy(link.Reader, conn) blocked on link.Reader forever — the session
+	// (and, with multiplexing off, its whole underlay) leaked. Now an activity
+	// timer cancels ctx on inactivity; a watcher force-unblocks both copies, and
+	// once one direction ends the remaining half is bounded by a short one-way
+	// timeout. Complements the mieru-library underlay reaper (empty underlays).
+	timer := signal.CancelAfterInactivity(ctx, cancel, bridgeIdleTimeout)
 	go func() {
-		_ = buf.Copy(buf.NewReader(conn), link.Writer)
+		<-ctx.Done()
+		conn.Close()
+		xcommon.Interrupt(link.Reader)
 		xcommon.Close(link.Writer)
 	}()
-	_ = buf.Copy(link.Reader, buf.NewWriter(conn))
-	xcommon.Interrupt(link.Reader)
+	requestDone := func() error {
+		defer timer.SetTimeout(bridgeOneWayTimeout)
+		return buf.Copy(buf.NewReader(conn), link.Writer, buf.UpdateActivity(timer))
+	}
+	responseDone := func() error {
+		defer timer.SetTimeout(bridgeOneWayTimeout)
+		return buf.Copy(link.Reader, buf.NewWriter(conn), buf.UpdateActivity(timer))
+	}
+	if err := task.Run(ctx, task.OnSuccess(requestDone, task.Close(link.Writer)), responseDone); err != nil {
+		xcommon.Interrupt(link.Reader)
+		xcommon.Close(link.Writer)
+	}
 }
 
 func zeroBind() model.AddrSpec { return model.AddrSpec{IP: net.IPv4zero, Port: 0} }

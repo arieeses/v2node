@@ -2,7 +2,6 @@ package obfs
 
 import (
 	"fmt"
-	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -14,6 +13,15 @@ import (
 )
 
 const dialTimeout = 10 * time.Second
+
+// obfsRelayIdle closes a relayed obfs connection idle in BOTH directions for
+// this long, so an idle client cannot pin the copy goroutines and fds forever.
+const obfsRelayIdle = 90 * time.Second
+
+// relayBufPool reuses copy buffers across relays so a burst of connections does
+// not allocate (and hold) a fresh 32KB buffer per copy goroutine. 16KB is ample
+// for TCP copy throughput and halves the per-connection footprint.
+var relayBufPool = sync.Pool{New: func() any { b := make([]byte, 16*1024); return &b }}
 
 // clientMaxSeg caps the segment size sent to obfs clients. Mobile paths with a
 // small MTU and black-holed PMTUD drop full-size segments; 1200 stays under the
@@ -138,17 +146,48 @@ func relay(client net.Conn, loopback string, mode int) {
 	}
 	defer up.Close()
 
+	// Proxy both ways with a both-sides-idle timeout. When either direction ends
+	// OR both sides are silent for obfsRelayIdle, close both ends (closing the
+	// underlying client unblocks the obfs-framed copy). Without this, a client
+	// that goes idle while the loopback xray keeps its side open would pin the
+	// relay + 2 copy goroutines + fds forever.
 	oc := newObfsConn(client, mode)
-	done := make(chan struct{}, 1)
-	go func() {
-		_, _ = io.Copy(up, oc) // client -> (de-obfs) -> xray
-		if t, ok := up.(*net.TCPConn); ok {
-			_ = t.CloseWrite()
+	relayIdle(oc, up, client)
+}
+
+// relayIdle copies both ways between framed client conn a and upstream b,
+// returning once either side ends or both are idle for obfsRelayIdle, closing
+// both (a's underlying socket via closeClient).
+func relayIdle(a, b, closeClient net.Conn) {
+	var once sync.Once
+	closeBoth := func() { once.Do(func() { closeClient.Close(); b.Close() }) }
+	var tmu sync.Mutex
+	timer := time.AfterFunc(obfsRelayIdle, closeBoth)
+	touch := func() { tmu.Lock(); timer.Reset(obfsRelayIdle); tmu.Unlock() }
+	done := make(chan struct{}, 2)
+	cp := func(dst, src net.Conn) {
+		bufp := relayBufPool.Get().(*[]byte)
+		buf := *bufp
+		defer relayBufPool.Put(bufp)
+		for {
+			n, err := src.Read(buf)
+			if n > 0 {
+				touch()
+				if _, werr := dst.Write(buf[:n]); werr != nil {
+					break
+				}
+			}
+			if err != nil {
+				break
+			}
 		}
 		done <- struct{}{}
-	}()
-	_, _ = io.Copy(oc, up) // xray -> (obfs) -> client
-	_ = client.SetReadDeadline(time.Now())
+	}
+	go cp(b, a) // client -> xray
+	go cp(a, b) // xray -> client
+	<-done
+	timer.Stop()
+	closeBoth()
 	<-done
 }
 

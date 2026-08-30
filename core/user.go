@@ -64,12 +64,26 @@ func (vc *V2Core) GetUserUUIDs(tag string) map[string]struct{} {
 }
 
 func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo) error {
-	// mieru node: drop users from the Runner (atomic re-register) + uidMap.
+	// mieru node: drop users from the Runner (atomic re-register) + uidMap, and
+	// run the SAME per-user teardown the normal path does — drop the traffic
+	// counter entry and force-close + drop the LinkManager. mieru bridges its
+	// streams through the dispatcher, so it DOES create counter/LinkManager
+	// entries keyed by email; the old code deleted only uidMap, leaking a
+	// LinkManager entry (and its live links) per churned mieru user.
 	if vc.mieru.Has(tag) {
 		uuids := make([]string, 0, len(users))
 		for i := range users {
 			uuids = append(uuids, users[i].Uuid)
-			vc.users.uidMap.Delete(format.UserTag(tag, users[i].Uuid))
+			email := format.UserTag(tag, users[i].Uuid)
+			vc.users.uidMap.Delete(email)
+			if v, ok := vc.dispatcher.Counter.Load(tag); ok {
+				v.(*counter.TrafficCounter).Delete(email)
+			}
+			if v, ok := vc.dispatcher.LinkManagers.Load(email); ok {
+				lm := v.(*dispatcher.LinkManager)
+				lm.CloseAll()
+				vc.dispatcher.LinkManagers.Delete(email)
+			}
 		}
 		vc.mieru.DelUsers(tag, uuids)
 		return nil

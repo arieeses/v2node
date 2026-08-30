@@ -12,13 +12,21 @@ package snirouter
 import (
 	"crypto/tls"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"strings"
 	"sync"
 	"time"
 )
+
+// relayIdleTimeout closes a relayed connection idle in BOTH directions for this
+// long, so a probe that sends a ClientHello then goes silent cannot pin the
+// copy goroutines and fds forever.
+const relayIdleTimeout = 90 * time.Second
+
+// relayBufPool reuses copy buffers across relays instead of allocating (and
+// holding) a fresh 32KB buffer per copy goroutine under probe load.
+var relayBufPool = sync.Pool{New: func() any { b := make([]byte, 16*1024); return &b }}
 
 // Router is a local SNI-aware TCP reverse proxy.
 type Router struct {
@@ -159,20 +167,50 @@ func (r *Router) handleConn(conn net.Conn) {
 		}
 	}
 
-	// Bidirectional copy
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		io.Copy(upstream, conn)
-		upstream.(*net.TCPConn).CloseWrite()
-	}()
-	go func() {
-		defer wg.Done()
-		io.Copy(conn, upstream)
-		conn.(*net.TCPConn).CloseWrite()
-	}()
-	wg.Wait()
+	// Bidirectional copy with a both-sides-idle timeout. When EITHER direction
+	// ends OR both sides go silent for relayIdleTimeout, both conns are closed so
+	// no goroutine/fd is pinned. This matters because a Reality probe often sends
+	// one ClientHello then goes idle in BOTH directions: plain io.Copy would then
+	// block on Read forever, pinning handleConn + 2 copy goroutines + 2 fds per
+	// probe — thousands under active scanning. The idle timer closes both ends on
+	// inactivity; each copy direction resets it on activity.
+	copyBothIdle(conn, upstream)
+}
+
+// copyBothIdle proxies bytes both ways between a and b and returns once either
+// side ends or both sides have been idle for relayIdleTimeout, closing both.
+func copyBothIdle(a, b net.Conn) {
+	var once sync.Once
+	closeBoth := func() { once.Do(func() { a.Close(); b.Close() }) }
+	var tmu sync.Mutex
+	timer := time.AfterFunc(relayIdleTimeout, closeBoth)
+	touch := func() { tmu.Lock(); timer.Reset(relayIdleTimeout); tmu.Unlock() }
+
+	done := make(chan struct{}, 2)
+	cp := func(dst, src net.Conn) {
+		bufp := relayBufPool.Get().(*[]byte)
+		buf := *bufp
+		defer relayBufPool.Put(bufp)
+		for {
+			n, err := src.Read(buf)
+			if n > 0 {
+				touch()
+				if _, werr := dst.Write(buf[:n]); werr != nil {
+					break
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+		done <- struct{}{}
+	}
+	go cp(b, a)
+	go cp(a, b)
+	<-done
+	timer.Stop()
+	closeBoth()
+	<-done
 }
 
 func (r *Router) resolve(sni string) string {

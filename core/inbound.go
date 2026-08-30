@@ -35,6 +35,31 @@ var (
 	activeSNIRouters = make(map[string]*snirouter.Router) // key = node tag
 )
 
+// cleanupNodeState drops every per-tag resource a node leaves behind so nothing
+// accumulates across node churn (add/remove/change of a tag over the process
+// lifetime): the SNI router (a live listener + accept goroutines + fd), the
+// dispatcher's per-tag traffic counter and camouflage engine (the latter owns a
+// dynamic-switcher goroutine), and the shadowflow node config. DelNode
+// previously freed only mieru/singbox/obfs/inbound and leaked all of these.
+func (v *V2Core) cleanupNodeState(tag string) {
+	sniRouterMu.Lock()
+	if r, ok := activeSNIRouters[tag]; ok {
+		r.Close()
+		delete(activeSNIRouters, tag)
+	}
+	sniRouterMu.Unlock()
+
+	if v.dispatcher != nil {
+		v.dispatcher.Counter.Delete(tag)
+		if e, ok := v.dispatcher.CamouflageEngines.LoadAndDelete(tag); ok {
+			if ce, ok := e.(*shadowflow.CamouflageEngine); ok {
+				ce.Close()
+			}
+		}
+	}
+	shadowflow.DeleteNodeConfig(tag)
+}
+
 func (v *V2Core) removeInbound(tag string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

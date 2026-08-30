@@ -2,13 +2,26 @@ package memtune
 
 import (
 	"os"
+	"runtime"
 	"runtime/debug"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 )
+
+// heapProfilePath is where StartScavenger writes a fresh heap profile each
+// cycle WHEN V2NODE_HEAP_DUMP=1, so a leak can be diagnosed without touching the
+// pprof HTTP endpoint: just copy this file. Off by default.
+const heapProfilePath = "/tmp/v2node-heap.prof"
+
+// dumpHeapEnabled reports whether periodic heap-profile dumps are turned on.
+var dumpHeapEnabled = func() bool {
+	v := strings.TrimSpace(os.Getenv("V2NODE_HEAP_DUMP"))
+	return v == "1" || strings.EqualFold(v, "true")
+}()
 
 // defaultScavengeInterval is how often to force freed heap memory back to the
 // OS. The Go runtime's background scavenger returns memory only lazily (and,
@@ -38,6 +51,29 @@ func StartScavenger() {
 			// Force freed spans back to the OS so RSS falls after load peaks
 			// instead of lingering at the high-water mark.
 			debug.FreeOSMemory()
+
+			// Log a memory snapshot every cycle so growth is visible in the
+			// journal (heap climbing = a real leak; stable = working set), with
+			// no need to run any pprof command.
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			log.WithFields(log.Fields{
+				"heap_mb":    m.HeapAlloc / 1048576,
+				"heapinuse":  m.HeapInuse / 1048576,
+				"sys_mb":     m.Sys / 1048576,
+				"goroutines": runtime.NumGoroutine(),
+			}).Info("memtune: mem snapshot")
+
+			// Optionally drop a fresh heap profile to disk so it can be analysed
+			// offline (go tool pprof -inuse_space) without the HTTP endpoint.
+			// Off by default — writing a profile every cycle is diagnostic
+			// overhead; enable per-box with V2NODE_HEAP_DUMP=1 when investigating.
+			if dumpHeapEnabled {
+				if f, err := os.Create(heapProfilePath); err == nil {
+					_ = pprof.WriteHeapProfile(f)
+					_ = f.Close()
+				}
+			}
 		}
 	}()
 }

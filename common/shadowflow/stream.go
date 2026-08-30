@@ -219,8 +219,21 @@ func (sc *ShadowStreamConn) AcceptStream() (*Stream, error) {
 	return s, nil
 }
 
-// Close shuts down the connection and all streams.
+// Close shuts down the connection and all streams, waiting for readLoop to
+// exit. Must NOT be called from readLoop itself (use shutdown for that).
 func (sc *ShadowStreamConn) Close() error {
+	sc.shutdown()
+	sc.wg.Wait()
+	return nil
+}
+
+// shutdown signals shutdown and closes the underlying conn WITHOUT waiting for
+// goroutines, so it is safe to call from readLoop. Closing sc.conn here is what
+// unblocks readLoop's ReadFrame so it can return. The old Close() instead
+// wg.Wait()ed BEFORE closing the conn, so it waited for a readLoop that was
+// still blocked on ReadFrame(conn) — a deadlock — and readLoop calling Close()
+// on error self-deadlocked the same way, leaking the goroutine and the conn.
+func (sc *ShadowStreamConn) shutdown() {
 	if sc.closed.CompareAndSwap(false, true) {
 		close(sc.stopCh)
 		close(sc.acceptCh)
@@ -234,10 +247,8 @@ func (sc *ShadowStreamConn) Close() error {
 			}
 			return true
 		})
-		sc.wg.Wait()
-		return sc.conn.Close()
+		_ = sc.conn.Close()
 	}
-	return nil
 }
 
 // readLoop processes incoming frames and dispatches to streams.
@@ -246,9 +257,7 @@ func (sc *ShadowStreamConn) readLoop() {
 	for {
 		frame, err := ReadFrame(sc.conn)
 		if err != nil {
-			if !sc.closed.Load() {
-				sc.Close()
-			}
+			sc.shutdown() // signal shutdown without waiting for ourselves
 			return
 		}
 
