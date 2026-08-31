@@ -1,6 +1,7 @@
 package memtune
 
 import (
+	"fmt"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -11,6 +12,11 @@ import (
 
 	log "github.com/sirupsen/logrus"
 )
+
+// memStatsPath holds the latest memory breakdown, rewritten every scavenge
+// cycle so `cat /tmp/v2node-mem.txt` shows the current numbers regardless of
+// the configured log level.
+const memStatsPath = "/tmp/v2node-mem.txt"
 
 // heapProfilePath is where StartScavenger writes a fresh heap profile each
 // cycle WHEN V2NODE_HEAP_DUMP=1, so a leak can be diagnosed without touching the
@@ -57,12 +63,26 @@ func StartScavenger() {
 			// no need to run any pprof command.
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
+			// Full breakdown so the cause is unambiguous from ONE line:
+			//  - heapinuse high & growing        -> live heap leak (a real leak)
+			//  - stack_mb high & growing          -> goroutine leak (leak in stacks)
+			//  - heapsys>>heapinuse, released low -> Go holding freed heap (GOMEMLIMIT)
+			const mb = 1048576
 			log.WithFields(log.Fields{
-				"heap_mb":    m.HeapAlloc / 1048576,
-				"heapinuse":  m.HeapInuse / 1048576,
-				"sys_mb":     m.Sys / 1048576,
+				"heapinuse":  m.HeapInuse / mb,  // live+recently-freed heap in use
+				"heapsys":    m.HeapSys / mb,    // heap reserved from OS
+				"released":   m.HeapReleased / mb, // heap already returned to OS
+				"stack_mb":   m.StackInuse / mb, // goroutine stacks (NOT in heap profile)
+				"sys_mb":     m.Sys / mb,        // total from OS (~RSS)
 				"goroutines": runtime.NumGoroutine(),
 			}).Info("memtune: mem snapshot")
+
+			// Also write the breakdown to a file so it is readable regardless of
+			// log level — `cat /tmp/v2node-mem.txt` shows the current numbers, no
+			// journal, no pprof, no restart-to-capture needed.
+			line := fmt.Sprintf("heapinuse=%dMB heapsys=%dMB released=%dMB stack=%dMB sys=%dMB goroutines=%d\n",
+				m.HeapInuse/mb, m.HeapSys/mb, m.HeapReleased/mb, m.StackInuse/mb, m.Sys/mb, runtime.NumGoroutine())
+			_ = os.WriteFile(memStatsPath, []byte(line), 0644)
 
 			// Optionally drop a fresh heap profile to disk so it can be analysed
 			// offline (go tool pprof -inuse_space) without the HTTP endpoint.

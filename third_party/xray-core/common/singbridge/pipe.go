@@ -4,9 +4,11 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing/common/bufio"
+	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/signal"
 	"github.com/xtls/xray-core/transport"
@@ -31,17 +33,46 @@ func CopyConn(ctx context.Context, inboundConn net.Conn, link *transport.Link, s
 	} else {
 		conn.R = &buf.BufferedReader{Reader: link.Reader}
 	}
-	// v2node patch: cancel the copy when both directions have been idle for
-	// ssInboundIdleTimeout so sing's group tears down and the buffers are freed.
-	// Wrapping both conns updates the timer on any read; hiding the WriteCloser
-	// interface also makes sing full-close (not CloseWrite) each side when a
-	// direction ends, promptly unblocking the other (half-close teardown).
+	// v2node patch — the actual fix for "SS/SS2022/TUIC RSS climbs with no
+	// traffic". sing's bufio.CopyConn runs a task.Group that waits for BOTH copy
+	// directions to finish (group.Run's `<-taskContext.Done()`), and its cleanup
+	// closes the conns via common.Close — but PipeConnWrapper.Close() is a no-op,
+	// so closing "source" never closes the inbound pipe. When a client half-closes
+	// then goes silent, the upload-direction Read (on link.Reader) blocks forever,
+	// group.Run never returns, and the copy goroutines + their SS AEAD reader/
+	// writer buffers are pinned for the process lifetime. A plain context cancel
+	// does NOT help, because the cancel path still relies on that no-op Close.
+	//
+	// So on genuine both-directions-idle we forcibly tear the connection down:
+	// interrupt the inbound pipe reader (unblocks the upload Read) and close both
+	// real sockets (unblocks the download Read). That makes CopyConn actually
+	// return so the buffers are freed. activityConn refreshes the timer on every
+	// read, so an active connection is never reaped — only a half-dead/idle one.
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	timer := signal.CancelAfterInactivity(ctx, cancel, ssInboundIdleTimeout)
-	return ReturnError(bufio.CopyConn(ctx,
+
+	var once sync.Once
+	teardown := func() {
+		once.Do(func() {
+			common.Interrupt(link.Reader)
+			common.Close(link.Writer)
+			if inboundConn != nil {
+				_ = inboundConn.Close()
+			}
+			if serverConn != nil {
+				_ = serverConn.Close()
+			}
+		})
+	}
+
+	timer := signal.CancelAfterInactivity(ctx, func() { teardown(); cancel() }, ssInboundIdleTimeout)
+	err := ReturnError(bufio.CopyConn(ctx,
 		&activityConn{Conn: conn, timer: timer},
 		&activityConn{Conn: serverConn, timer: timer}))
+	// Release sockets/pipe promptly on normal completion too, so the inactivity
+	// timer and its captured conns don't linger for up to one timeout interval.
+	teardown()
+	return err
 }
 
 // activityConn refreshes an inactivity timer on every non-empty read so an
