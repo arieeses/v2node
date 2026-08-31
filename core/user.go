@@ -12,7 +12,6 @@ import (
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/counter"
 	"github.com/wyx2685/v2node/common/format"
-	"github.com/wyx2685/v2node/core/app/dispatcher"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/serial"
 	"github.com/xtls/xray-core/infra/conf"
@@ -64,12 +63,10 @@ func (vc *V2Core) GetUserUUIDs(tag string) map[string]struct{} {
 }
 
 func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo) error {
-	// mieru node: drop users from the Runner (atomic re-register) + uidMap, and
-	// run the SAME per-user teardown the normal path does — drop the traffic
-	// counter entry and force-close + drop the LinkManager. mieru bridges its
-	// streams through the dispatcher, so it DOES create counter/LinkManager
-	// entries keyed by email; the old code deleted only uidMap, leaking a
-	// LinkManager entry (and its live links) per churned mieru user.
+	// mieru node: drop users from the Runner (atomic re-register) + uidMap and
+	// drop their traffic-counter entry. Existing connections are NOT force-closed;
+	// like upstream xray, removing a user only stops NEW connections and the old
+	// ones drain naturally — no per-connection bookkeeping to leak.
 	if vc.mieru.Has(tag) {
 		uuids := make([]string, 0, len(users))
 		for i := range users {
@@ -78,11 +75,6 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 			vc.users.uidMap.Delete(email)
 			if v, ok := vc.dispatcher.Counter.Load(tag); ok {
 				v.(*counter.TrafficCounter).Delete(email)
-			}
-			if v, ok := vc.dispatcher.LinkManagers.Load(email); ok {
-				lm := v.(*dispatcher.LinkManager)
-				lm.CloseAll()
-				vc.dispatcher.LinkManagers.Delete(email)
 			}
 		}
 		vc.mieru.DelUsers(tag, uuids)
@@ -106,11 +98,6 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 		if v, ok := vc.dispatcher.Counter.Load(tag); ok {
 			tc := v.(*counter.TrafficCounter)
 			tc.Delete(user)
-		}
-		if v, ok := vc.dispatcher.LinkManagers.Load(user); ok {
-			lm := v.(*dispatcher.LinkManager)
-			lm.CloseAll()
-			vc.dispatcher.LinkManagers.Delete(user)
 		}
 	}
 	if notFoundCount > 0 {
