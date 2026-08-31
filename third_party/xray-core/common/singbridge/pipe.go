@@ -69,9 +69,17 @@ func CopyConn(ctx context.Context, inboundConn net.Conn, link *transport.Link, s
 	err := ReturnError(bufio.CopyConn(ctx,
 		&activityConn{Conn: conn, timer: timer},
 		&activityConn{Conn: serverConn, timer: timer}))
-	// Release sockets/pipe promptly on normal completion too, so the inactivity
-	// timer and its captured conns don't linger for up to one timeout interval.
-	teardown()
+	// On normal completion, STOP the inactivity timer — do not merely tear the
+	// sockets down. CancelAfterInactivity runs a recurring task.Periodic that
+	// keeps the onTimeout closure (which captures inboundConn/serverConn — the
+	// ~72KB SS AEAD reader+writer) reachable until it next fires, i.e. for up to
+	// one full 5-minute interval AFTER the connection has already closed. Closing
+	// the sockets does not free that memory because the timer still references the
+	// conns, so on a high-churn box every finished SS conn lingers ~5min and they
+	// pile up into hundreds of MB of dead reader/writer buffers. SetTimeout(0)
+	// fires the once-guarded teardown and closes the timer's check task, releasing
+	// the closure now so the conns become collectable immediately.
+	timer.SetTimeout(0)
 	return err
 }
 
