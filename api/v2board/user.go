@@ -25,6 +25,11 @@ type UserInfo struct {
 	Uuid        string `json:"uuid" msgpack:"uuid"`
 	SpeedLimit  int    `json:"speed_limit" msgpack:"speed_limit"`
 	DeviceLimit int    `json:"device_limit" msgpack:"device_limit"`
+	// Key is an optional per-user protocol identifier used by key-based protocols
+	// that carry a wire user-tag instead of authenticating by uuid: for sudoku it
+	// is the user's 8-byte UserHash (hex), for snell v6 the clientID. The panel
+	// computes and sends it; it is empty for protocols that don't need it.
+	Key string `json:"key,omitempty" msgpack:"key,omitempty"`
 }
 
 type UserListBody struct {

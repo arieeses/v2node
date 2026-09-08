@@ -80,6 +80,36 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 		vc.mieru.DelUsers(tag, uuids)
 		return nil
 	}
+	// sudoku node: same shape as mieru — drop uidMap + counter entries and the
+	// runner's {UserHash -> uuid} entries; existing connections drain naturally.
+	if vc.sudoku.Has(tag) {
+		uuids := make([]string, 0, len(users))
+		for i := range users {
+			uuids = append(uuids, users[i].Uuid)
+			email := format.UserTag(tag, users[i].Uuid)
+			vc.users.uidMap.Delete(email)
+			if v, ok := vc.dispatcher.Counter.Load(tag); ok {
+				v.(*counter.TrafficCounter).Delete(email)
+			}
+		}
+		vc.sudoku.DelUsers(tag, uuids)
+		return nil
+	}
+	// snell node: same shape — drop uidMap + counter entries and the runner's
+	// user set; existing connections drain naturally.
+	if vc.snell.Has(tag) {
+		uuids := make([]string, 0, len(users))
+		for i := range users {
+			uuids = append(uuids, users[i].Uuid)
+			email := format.UserTag(tag, users[i].Uuid)
+			vc.users.uidMap.Delete(email)
+			if v, ok := vc.dispatcher.Counter.Load(tag); ok {
+				v.(*counter.TrafficCounter).Delete(email)
+			}
+		}
+		vc.snell.DelUsers(tag, uuids)
+		return nil
+	}
 	userManager, err := vc.GetUserManager(tag)
 	if err != nil {
 		return fmt.Errorf("get user manager error: %s", err)
@@ -179,6 +209,20 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	// (counted by email = UserTag) resolves back to the UID on report.
 	if p.NodeInfo.Type == "mieru" {
 		if err := v.mieru.AddUsers(p.Tag, p.Users); err != nil {
+			return 0, err
+		}
+		return len(p.Users), nil
+	}
+	// sudoku: users live in the sudoku Runner's {UserHash -> uuid} map; uidMap
+	// above is still populated so per-user traffic (email = UserTag) resolves.
+	if p.NodeInfo.Type == "sudoku" {
+		if err := v.sudoku.AddUsers(p.Tag, p.Users); err != nil {
+			return 0, err
+		}
+		return len(p.Users), nil
+	}
+	if p.NodeInfo.Type == "snell" {
+		if err := v.snell.AddUsers(p.Tag, p.Users); err != nil {
 			return 0, err
 		}
 		return len(p.Users), nil

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"io"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -89,6 +90,25 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Co
 	sess.fw = newFrameWriter(sess.bw)
 	sess.peerVersion = 1
 
+	// 下行整形：服务端用与推给客户端相同的方案，整形回程数据的前几个包(pumpDownlink)，
+	// 消除「上行整形、下行裸发」的不对称特征。有配置用配置，无配置用非标准的
+	// customServerDefaultScheme。pktCounter 从 1 起，因为 packetIndex=0 不整形。
+	sess.pktCounter.Store(1)
+	schemeSrc := "customDefault"
+	if s.paddingScheme != "" {
+		sess.paddingScheme = newPaddingScheme([]byte(s.paddingScheme))
+		schemeSrc = "config"
+	} else {
+		sess.paddingScheme = newPaddingScheme(customServerDefaultScheme)
+	}
+
+	// 服务端读空闲超时:回收异常掉线残留的死会话。取 xray ConnIdle 策略，未配则 300s
+	// (远大于客户端 60s 的空闲关闭，只杀真·死连接，不误伤健康会话)。
+	sess.serverIdleTimeout = sessPol.Timeouts.ConnectionIdle
+	if sess.serverIdleTimeout <= 0 {
+		sess.serverIdleTimeout = 300 * time.Second
+	}
+
 	// auth header: 32B sha256(password) + 2B padlen
 	var h [34]byte
 	if _, err := io.ReadFull(sess.br, h[:]); err != nil {
@@ -100,8 +120,14 @@ func (s *Server) Process(ctx context.Context, network xnet.Network, conn stat.Co
 	snap := s.loadStore()
 	user := snap.users[sum]
 	if user == nil {
-		return errors.New("anytls: invalid user")
+		log.Printf("[anytls-dbg] %v auth FAIL -> decoy", conn.RemoteAddr())
+		// 抗主动探测:认证失败不闷声断开,而是伪装成普通网站回个 200 页面再关。
+		// 让探测者看到的是"正常 HTTP 服务器",而不是"读几字节就断=代理"。
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		serveDecoy(conn, sess.br)
+		return nil
 	}
+	log.Printf("[anytls-dbg] %v auth OK user=%v idleTimeout=%v schemeSrc=%s", conn.RemoteAddr(), user.Email, sess.serverIdleTimeout, schemeSrc)
 
 	padlen := binary.BigEndian.Uint16(h[32:34])
 	if padlen > 0 {

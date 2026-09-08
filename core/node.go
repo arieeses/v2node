@@ -23,6 +23,17 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo, disableSniffing bool)
 		return v.mieru.Add(tag, info)
 	}
 
+	// sudoku is likewise not an Xray inbound: it terminates the sudoku protocol
+	// on its own listener and bridges each stream into the dispatcher. Users are
+	// pushed later via AddUsers.
+	if info.Type == "sudoku" {
+		return v.sudoku.Add(tag, info)
+	}
+
+	if info.Type == "snell" {
+		return v.snell.Add(tag, info)
+	}
+
 	// Both shadow-tls and simple-obfs "tls" front the public port and bind the
 	// real Xray SS inbound to a loopback port. shadow-tls uses a sing-box
 	// subprocess; obfs-tls uses a native in-process front.
@@ -89,6 +100,15 @@ func (v *V2Core) DelNode(tag string) error {
 	// mieru node: stop its Mux (no Xray inbound to remove).
 	if v.mieru.Has(tag) {
 		v.mieru.Del(tag)
+		return nil
+	}
+	// sudoku node: stop its listener (no Xray inbound to remove).
+	if v.sudoku.Has(tag) {
+		v.sudoku.Del(tag)
+		return nil
+	}
+	if v.snell.Has(tag) {
+		v.snell.Del(tag)
 		return nil
 	}
 	// Stop any front (sing-box shadow-tls / native obfs-tls) that owns the

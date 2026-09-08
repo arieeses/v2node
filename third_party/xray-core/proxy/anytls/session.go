@@ -6,10 +6,12 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"io"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/common/uot"
@@ -54,6 +56,10 @@ type session struct {
 
 	schemeMu      sync.RWMutex
 	paddingScheme *paddingScheme
+
+	// serverIdleTimeout：服务端读空闲上限(0=不限)。握手后每读一帧重置，超时即回收会话，
+	// 清理客户端异常掉线(无 RST)残留的死连接，避免弱机上会话/goroutine 堆积。
+	serverIdleTimeout time.Duration
 
 	synAckMu sync.Mutex
 	synAckCh map[uint32]chan error
@@ -212,7 +218,19 @@ func (s *session) pumpDownlink(sid uint32, link *transport.Link) {
 			break
 		}
 
-		if err := s.sendStreamData(sid, mb, 0); err != nil {
+		// 下行整形：前 scheme.stop 个包按方案切分/填充记录大小(与客户端上行同一套逻辑)；
+		// 之后 packetIndex=0 直接发。客户端透明跳过 cmdWaste、按长度重组 cmdPSH，无需改动。
+		var pktIndex uint32
+		s.schemeMu.RLock()
+		scheme := s.paddingScheme
+		s.schemeMu.RUnlock()
+		if scheme != nil && s.pktCounter.Load() < scheme.stop {
+			pktIndex = s.pktCounter.Add(1) - 1
+		} else {
+			pktIndex = 0
+		}
+
+		if err := s.sendStreamData(sid, mb, pktIndex); err != nil {
 			return
 		}
 	}
@@ -314,10 +332,18 @@ func (s *session) sendStreamData(sid uint32, data buf.MultiBuffer, packetIndex u
 func (s *session) readLoop(ctx context.Context) error {
 	var head [7]byte
 	for {
+		// 服务端空闲超时:每读一帧重置。客户端默认 60s 关闭空闲会话，故 300s 无任何帧
+		// 基本就是异常掉线的死连接，回收它释放会话/goroutine(弱机友好)。仅服务端生效。
+		if !s.isClient && s.serverIdleTimeout > 0 {
+			_ = s.conn.SetReadDeadline(time.Now().Add(s.serverIdleTimeout))
+		}
 		_, err := io.ReadFull(s.br, head[:])
 		if err != nil {
 			if s.isClosed() {
 				return nil
+			}
+			if !s.isClient {
+				log.Printf("[anytls-dbg] readLoop exit err=%v handshakeDone=%v", err, s.handshakeDone)
 			}
 			return err
 		}
@@ -372,13 +398,24 @@ func (s *session) readLoop(ctx context.Context) error {
 			if err := s.sendFrame(&frame{cmd: cmdServerSettings, sid: 0, data: []byte("v=2")}); err != nil {
 				return err
 			}
-			if s.server != nil && s.server.paddingScheme != "" && s.clientPaddingMD5 != "" {
-				sum := md5.Sum([]byte(s.server.paddingScheme))
-				if strings.ToLower(hex.EncodeToString(sum[:])) != s.clientPaddingMD5 {
-					if err := s.sendFrame(&frame{cmd: cmdUpdatePaddingScheme, sid: 0, data: []byte(s.server.paddingScheme)}); err != nil {
+			if s.server != nil && s.clientPaddingMD5 != "" {
+				// 有配置用配置(逐节点自定义)；没配置回退用本端自定义默认方案，
+				// 让握手指纹默认就不同于「标准 anytls」。二者都靠 cmdUpdatePaddingScheme
+				// 推给客户端，客户端自动采用，无需更新。
+				effScheme := s.server.paddingScheme
+				if effScheme == "" {
+					effScheme = string(customServerDefaultScheme)
+				}
+				sum := md5.Sum([]byte(effScheme))
+				pushed := strings.ToLower(hex.EncodeToString(sum[:])) != s.clientPaddingMD5
+				if pushed {
+					if err := s.sendFrame(&frame{cmd: cmdUpdatePaddingScheme, sid: 0, data: []byte(effScheme)}); err != nil {
 						return err
 					}
 				}
+				log.Printf("[anytls-dbg] handshake done: clientMD5=%s pushed=%v schemeLen=%d", s.clientPaddingMD5, pushed, len(effScheme))
+			} else {
+				log.Printf("[anytls-dbg] handshake done: no push (server=%v clientMD5=%q)", s.server != nil, s.clientPaddingMD5)
 			}
 			s.handshakeDone = true
 		case cmdHeartRequest:
@@ -426,6 +463,7 @@ func (s *session) readLoop(ctx context.Context) error {
 					s.streams[sid] = &stream{sid: sid}
 				}
 				s.streamsMu.Unlock()
+				log.Printf("[anytls-dbg] cmdSYN sid=%d (stream open)", sid)
 			}
 		case cmdPSH:
 			if length <= 0 {

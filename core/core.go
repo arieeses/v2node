@@ -8,6 +8,8 @@ import (
 	"github.com/wyx2685/v2node/common/mieru"
 	"github.com/wyx2685/v2node/common/obfs"
 	"github.com/wyx2685/v2node/common/singbox"
+	"github.com/wyx2685/v2node/common/sudoku"
+	"github.com/wyx2685/v2node/common/snell"
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core/app/dispatcher"
 	_ "github.com/wyx2685/v2node/core/distro/all"
@@ -39,6 +41,8 @@ type V2Core struct {
 	dispatcher *dispatcher.DefaultDispatcher
 	singbox    *singbox.Manager
 	mieru      *mieru.Manager
+	sudoku     *sudoku.Manager
+	snell      *snell.Manager
 	obfs       *obfs.Manager
 }
 
@@ -54,8 +58,10 @@ func New(config *conf.Conf) *V2Core {
 			config.Global.EffectiveSingBoxPath(),
 			config.Global.EffectiveSingBoxDir(),
 		),
-		mieru: mieru.NewManager(),
-		obfs:  obfs.NewManager(),
+		mieru:  mieru.NewManager(),
+		sudoku: sudoku.NewManager(),
+		snell:  snell.NewManager(),
+		obfs:   obfs.NewManager(),
 	}
 	return core
 }
@@ -71,6 +77,8 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 	v.ohm = v.Server.GetFeature(outbound.ManagerType()).(outbound.Manager)
 	v.dispatcher = v.Server.GetFeature(routing.DispatcherType()).(*dispatcher.DefaultDispatcher)
 	v.mieru.SetDispatcher(v.dispatcher)
+	v.sudoku.SetDispatcher(v.dispatcher)
+	v.snell.SetDispatcher(v.dispatcher)
 	return nil
 }
 
@@ -82,6 +90,12 @@ func (v *V2Core) Close() error {
 	}
 	if v.mieru != nil {
 		v.mieru.CloseAll()
+	}
+	if v.sudoku != nil {
+		v.sudoku.CloseAll()
+	}
+	if v.snell != nil {
+		v.snell.CloseAll()
 	}
 	if v.obfs != nil {
 		v.obfs.StopAll()

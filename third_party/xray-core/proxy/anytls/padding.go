@@ -21,6 +21,22 @@ var defaultPaddingScheme = []byte(`stop=8
 6=500-1000
 7=500-1000`)
 
+// customServerDefaultScheme 是本端(v2node 服务端)在节点未配置 padding_scheme 时，
+// 主动推给客户端(cmdUpdatePaddingScheme)的默认方案。刻意区别于 anytls 公开默认
+// (defaultPaddingScheme)——让握手期的 TLS 记录大小分布不同于「标准 anytls」指纹，
+// 且 md5 不同，从而躲开基于公开默认方案的特征匹配。尺寸偏向 MTU(≤1460)以更像常规
+// HTTPS 分段。可被面板的 padding_scheme 逐节点覆盖(若要每节点唯一，建议在面板另配)。
+var customServerDefaultScheme = []byte(`stop=9
+0=48-64
+1=150-900
+2=500-1200,c,800-1400,c,900-1460,c,900-1460
+3=16-64,800-1400
+4=800-1460
+5=800-1460
+6=800-1460
+7=600-1460
+8=400-1200`)
+
 type paddingScheme struct {
 	rawScheme []byte
 	scheme    map[string]string

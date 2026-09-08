@@ -1,0 +1,424 @@
+/*
+Copyright (C) 2026 by saba <contact me via issue>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <http://www.gnu.org/licenses/>.
+
+In addition, no derivative work may use the name or imply association
+with this application without prior consent.
+*/
+package geodata
+
+import (
+	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func TestIsCN_HostPortMatchesDomainRules(t *testing.T) {
+	m := &Manager{
+		domainExact:  map[string]struct{}{"api.bilibili.com": {}},
+		domainSuffix: map[string]struct{}{"bilibili.com": {}},
+	}
+
+	if ok, _ := m.MatchCN("www.bilibili.com:443", nil); !ok {
+		t.Fatalf("expected suffix domain match for host:port")
+	}
+	if ok, _ := m.MatchCN("api.bilibili.com:443", nil); !ok {
+		t.Fatalf("expected exact domain match for host:port")
+	}
+}
+
+func TestParseRule_NormalizesDomainEntries(t *testing.T) {
+	state := &ruleBuildState{
+		exact:   make(map[string]struct{}),
+		keyword: make(map[string]struct{}),
+		suffix:  make(map[string]struct{}),
+	}
+
+	parseRule("DOMAIN, API.BiliBili.Com.", state)
+	parseRule("DOMAIN-KEYWORD,BiliBili", state)
+	parseRule("DOMAIN-SUFFIX,.BiliBili.Com", state)
+
+	if _, ok := state.exact["api.bilibili.com"]; !ok {
+		t.Fatalf("expected normalized exact domain entry")
+	}
+	if _, ok := state.keyword["bilibili"]; !ok {
+		t.Fatalf("expected normalized keyword domain entry")
+	}
+	if _, ok := state.suffix["bilibili.com"]; !ok {
+		t.Fatalf("expected normalized suffix domain entry")
+	}
+}
+
+func TestParseRule_AcceptsBareDomainEntries(t *testing.T) {
+	state := &ruleBuildState{
+		exact:   make(map[string]struct{}),
+		keyword: make(map[string]struct{}),
+		suffix:  make(map[string]struct{}),
+	}
+
+	parseRule("'ad.qq.com'", state)
+	parseRule("+.ads.example.com", state)
+
+	if _, ok := state.exact["ad.qq.com"]; !ok {
+		t.Fatalf("expected bare domain entry to be parsed as exact domain")
+	}
+	if _, ok := state.suffix["ads.example.com"]; !ok {
+		t.Fatalf("expected +. bare domain entry to be parsed as suffix domain")
+	}
+}
+
+func TestIsCN_IPv6RuleMatch(t *testing.T) {
+	m := &Manager{
+		domainExact:  make(map[string]struct{}),
+		domainSuffix: make(map[string]struct{}),
+	}
+	state := &ruleBuildState{
+		exact:   make(map[string]struct{}),
+		keyword: make(map[string]struct{}),
+		suffix:  make(map[string]struct{}),
+	}
+
+	parseRule("IP-CIDR6,2400:3200::/32", state)
+	m.ipRanges = mergeRanges(state.ipv4)
+	m.ipv6Ranges = mergeIPv6Ranges(state.ipv6)
+
+	ip := net.ParseIP("2400:3200::1234")
+	if ip == nil {
+		t.Fatalf("parse test ipv6 failed")
+	}
+	if ok, _ := m.MatchCN("video.example:443", ip); !ok {
+		t.Fatalf("expected ipv6 rule match")
+	}
+}
+
+func TestMatchRule_ExcludesImplicitLocalNetwork(t *testing.T) {
+	m := &Manager{
+		domainExact:  make(map[string]struct{}),
+		domainSuffix: make(map[string]struct{}),
+	}
+	ip := net.ParseIP("192.168.1.10")
+	if ip == nil {
+		t.Fatalf("parse test ip failed")
+	}
+
+	if ok, match := m.MatchCN("192.168.1.10:80", ip); !ok || match.Kind != "LOCAL" {
+		t.Fatalf("expected implicit local MatchCN result, got %t %+v", ok, match)
+	}
+	if ok, match := m.MatchRule("192.168.1.10:80", ip); ok {
+		t.Fatalf("unexpected explicit rule match: %+v", match)
+	}
+}
+
+func TestParseRule_IPv6DoesNotPolluteIPv4Ranges(t *testing.T) {
+	m := &Manager{
+		domainExact:  make(map[string]struct{}),
+		domainSuffix: make(map[string]struct{}),
+	}
+	state := &ruleBuildState{
+		exact:   make(map[string]struct{}),
+		keyword: make(map[string]struct{}),
+		suffix:  make(map[string]struct{}),
+	}
+
+	parseRule("IP-CIDR6,2400:3200::/32", state)
+	m.ipRanges = mergeRanges(state.ipv4)
+	m.ipv6Ranges = mergeIPv6Ranges(state.ipv6)
+
+	ipv4 := net.ParseIP("36.112.0.1")
+	if ipv4 == nil {
+		t.Fatalf("parse test ipv4 failed")
+	}
+	if ok, _ := m.MatchCN("36.112.0.1:443", ipv4); ok {
+		t.Fatalf("unexpected ipv4 match from ipv6-only rule")
+	}
+}
+
+func TestDownloadAndParse_UsesRuleDownloadClient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("payload:\n  - DOMAIN-SUFFIX,example.cn\n"))
+	}))
+	defer srv.Close()
+
+	parsedURL, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+	serverHost, serverPort, err := net.SplitHostPort(parsedURL.Host)
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+
+	oldNewRuleDownloadClient := newRuleDownloadClient
+	t.Cleanup(func() {
+		newRuleDownloadClient = oldNewRuleDownloadClient
+	})
+
+	newRuleDownloadClient = func() *http.Client {
+		return &http.Client{
+			Timeout: 5 * time.Second,
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					if addr == net.JoinHostPort("resolver.test", serverPort) {
+						addr = net.JoinHostPort(serverHost, serverPort)
+					}
+					var d net.Dialer
+					return d.DialContext(ctx, network, addr)
+				},
+			},
+		}
+	}
+
+	state := &ruleBuildState{
+		exact:   make(map[string]struct{}),
+		keyword: make(map[string]struct{}),
+		suffix:  make(map[string]struct{}),
+	}
+	m := &Manager{}
+	m.downloadAndParse("http://resolver.test:"+serverPort+"/rules", state)
+
+	if _, ok := state.suffix["example.cn"]; !ok {
+		t.Fatalf("expected rules downloaded through injected client")
+	}
+}
+
+func TestDownloadAndParse_YAMLBareDomains(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("payload:\n  - 'ad.qq.com'\n  - '+.ads.example.com'\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	state := &ruleBuildState{
+		exact:   make(map[string]struct{}),
+		keyword: make(map[string]struct{}),
+		suffix:  make(map[string]struct{}),
+	}
+	m := &Manager{}
+	if !m.downloadAndParse(srv.URL, state) {
+		t.Fatalf("expected downloadAndParse to succeed")
+	}
+
+	if _, ok := state.exact["ad.qq.com"]; !ok {
+		t.Fatalf("expected bare yaml domain to be parsed as exact domain")
+	}
+	if _, ok := state.suffix["ads.example.com"]; !ok {
+		t.Fatalf("expected +. yaml domain to be parsed as suffix domain")
+	}
+}
+
+func TestDownloadAndParse_FallsBackToLastGoodCache(t *testing.T) {
+	var unavailable atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if unavailable.Load() {
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("payload:\n  - DOMAIN-SUFFIX,cached.example\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	cacheDir := t.TempDir()
+	m := NewManager([]string{srv.URL})
+	m.cacheDir = cacheDir
+
+	state := newRuleBuildState()
+	if !m.downloadAndParse(srv.URL, state) {
+		t.Fatal("expected initial rule download to succeed")
+	}
+	if _, ok := state.suffix["cached.example"]; !ok {
+		t.Fatal("expected initial rules to be parsed")
+	}
+
+	unavailable.Store(true)
+	restarted := NewManager([]string{srv.URL})
+	restarted.cacheDir = cacheDir
+	cachedState := newRuleBuildState()
+	if !restarted.downloadAndParse(srv.URL, cachedState) {
+		t.Fatal("expected failed refresh to use cached rules")
+	}
+	if _, ok := cachedState.suffix["cached.example"]; !ok {
+		t.Fatal("expected cached rules after failed refresh")
+	}
+}
+
+func TestDownloadAndParse_CacheIsIsolatedByURL(t *testing.T) {
+	var unavailable atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if unavailable.Load() {
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("payload:\n  - DOMAIN-SUFFIX,first.example\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	m := NewManager(nil)
+	m.cacheDir = t.TempDir()
+	if !m.downloadAndParse(srv.URL+"/first", newRuleBuildState()) {
+		t.Fatal("expected first URL to populate its cache")
+	}
+
+	unavailable.Store(true)
+	if m.downloadAndParse(srv.URL+"/second", newRuleBuildState()) {
+		t.Fatal("different URL must not reuse another source's cache")
+	}
+}
+
+func TestDownloadAndParse_RefreshReplacesCachedRules(t *testing.T) {
+	var payload atomic.Value
+	payload.Store("payload:\n  - DOMAIN-SUFFIX,old.example\n")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(payload.Load().(string)))
+	}))
+
+	cacheDir := t.TempDir()
+	m := NewManager([]string{srv.URL})
+	m.cacheDir = cacheDir
+	if !m.downloadAndParse(srv.URL, newRuleBuildState()) {
+		t.Fatal("expected initial rule download to succeed")
+	}
+
+	payload.Store("payload:\n  - DOMAIN-SUFFIX,new.example\n")
+	if !m.downloadAndParse(srv.URL, newRuleBuildState()) {
+		t.Fatal("expected refreshed rule download to succeed")
+	}
+
+	payload.Store("<html>not rules</html>")
+	fallbackState := newRuleBuildState()
+	if !m.downloadAndParse(srv.URL, fallbackState) {
+		t.Fatal("expected invalid refresh content to use cached rules")
+	}
+	if _, ok := fallbackState.suffix["new.example"]; !ok {
+		t.Fatal("invalid refresh content must not replace the last good cache")
+	}
+	srv.Close()
+
+	restarted := NewManager([]string{srv.URL})
+	restarted.cacheDir = cacheDir
+	state := newRuleBuildState()
+	if !restarted.downloadAndParse(srv.URL, state) {
+		t.Fatal("expected cached refreshed rules after server shutdown")
+	}
+	if _, ok := state.suffix["new.example"]; !ok {
+		t.Fatal("expected the latest successful response in cache")
+	}
+	if _, ok := state.suffix["old.example"]; ok {
+		t.Fatal("stale rules must not remain after cache refresh")
+	}
+}
+
+func TestDownloadAndParse_RejectsInvalidCache(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+
+	m := NewManager([]string{srv.URL})
+	m.cacheDir = t.TempDir()
+	path, err := m.ruleCachePath(srv.URL)
+	if err != nil {
+		t.Fatalf("build cache path: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("<html>not rules</html>"), 0o600); err != nil {
+		t.Fatalf("write invalid cache: %v", err)
+	}
+
+	if m.downloadAndParse(srv.URL, newRuleBuildState()) {
+		t.Fatal("invalid cached content must not be loaded")
+	}
+}
+
+func TestMatchCN_DomainKeywordRuleMatch(t *testing.T) {
+	m := &Manager{
+		domainExact:   make(map[string]struct{}),
+		domainKeyword: map[string]struct{}{"bilibili": {}},
+		domainSuffix:  make(map[string]struct{}),
+	}
+
+	if ok, match := m.MatchCN("api.bilibili.com:443", nil); !ok {
+		t.Fatalf("expected keyword domain match")
+	} else if match.Kind != "DOMAIN-KEYWORD" || match.Value != "bilibili" {
+		t.Fatalf("unexpected keyword match: %+v", match)
+	}
+}
+
+func TestUpdate_AppliesEachSourceIncrementally(t *testing.T) {
+	secondRelease := make(chan struct{})
+	firstServed := make(chan struct{}, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/first"):
+			_, _ = w.Write([]byte("payload:\n  - DOMAIN-SUFFIX,first.cn\n"))
+			select {
+			case firstServed <- struct{}{}:
+			default:
+			}
+		case strings.HasSuffix(r.URL.Path, "/second"):
+			<-secondRelease
+			_, _ = w.Write([]byte("payload:\n  - DOMAIN-SUFFIX,second.cn\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	m := NewManager([]string{srv.URL + "/first", srv.URL + "/second"})
+	m.cacheDir = t.TempDir()
+
+	done := make(chan struct{})
+	go func() {
+		m.Update()
+		close(done)
+	}()
+
+	select {
+	case <-firstServed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first rule source was not requested")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if ok, _ := m.MatchCN("www.first.cn:443", nil); ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ok, _ := m.MatchCN("www.first.cn:443", nil); !ok {
+		t.Fatalf("expected first source to be applied before second source completed")
+	}
+	if ok, _ := m.MatchCN("www.second.cn:443", nil); ok {
+		t.Fatalf("second source should not be applied before its download completes")
+	}
+
+	close(secondRelease)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("update did not finish")
+	}
+
+	if ok, _ := m.MatchCN("www.second.cn:443", nil); !ok {
+		t.Fatalf("expected second source to be applied after its download completed")
+	}
+}
