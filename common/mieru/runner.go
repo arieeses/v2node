@@ -11,6 +11,7 @@ import (
 	"github.com/enfein/mieru/v3/apis/constant"
 	"github.com/enfein/mieru/v3/apis/model"
 	"github.com/enfein/mieru/v3/apis/trafficpattern"
+	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	mcommon "github.com/enfein/mieru/v3/pkg/common"
 	mlog "github.com/enfein/mieru/v3/pkg/log"
 	mmetrics "github.com/enfein/mieru/v3/pkg/metrics"
@@ -87,7 +88,19 @@ func (r *Runner) startLocked() error {
 	if err != nil {
 		return err
 	}
-	tp, err := trafficpattern.NewConfig(nil)
+	// Traffic pattern: decode the operator-configured value from the panel's
+	// network_settings (base64-encoded protobuf). Empty/unset → nil → mieru's
+	// implicit default pattern. We skip Decode("") on a blank field so a blank
+	// value is unambiguously "use the built-in default".
+	ns := parseNS(r.info.Common.NetworkSettings)
+	var pattern *pb.TrafficPattern
+	if ns.TrafficPattern != "" {
+		pattern, err = trafficpattern.Decode(ns.TrafficPattern)
+		if err != nil {
+			return fmt.Errorf("decode mieru traffic_pattern failed: %w", err)
+		}
+	}
+	tp, err := trafficpattern.NewConfig(pattern)
 	if err != nil {
 		return err
 	}
