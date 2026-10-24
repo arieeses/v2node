@@ -10,6 +10,8 @@ import (
 	"github.com/wyx2685/v2node/common/singbox"
 	"github.com/wyx2685/v2node/common/sudoku"
 	"github.com/wyx2685/v2node/common/snell"
+	"github.com/wyx2685/v2node/common/ssaead"
+	"github.com/wyx2685/v2node/common/ssr"
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core/app/dispatcher"
 	_ "github.com/wyx2685/v2node/core/distro/all"
@@ -43,6 +45,8 @@ type V2Core struct {
 	mieru      *mieru.Manager
 	sudoku     *sudoku.Manager
 	snell      *snell.Manager
+	ssaead     *ssaead.Manager
+	ssr        *ssr.Manager
 	obfs       *obfs.Manager
 }
 
@@ -61,6 +65,8 @@ func New(config *conf.Conf) *V2Core {
 		mieru:  mieru.NewManager(),
 		sudoku: sudoku.NewManager(),
 		snell:  snell.NewManager(),
+		ssaead: ssaead.NewManager(),
+		ssr:    ssr.NewManager(),
 		obfs:   obfs.NewManager(),
 	}
 	return core
@@ -79,6 +85,8 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 	v.mieru.SetDispatcher(v.dispatcher)
 	v.sudoku.SetDispatcher(v.dispatcher)
 	v.snell.SetDispatcher(v.dispatcher)
+	v.ssaead.SetDispatcher(v.dispatcher)
+	v.ssr.SetDispatcher(v.dispatcher)
 	return nil
 }
 
@@ -96,6 +104,12 @@ func (v *V2Core) Close() error {
 	}
 	if v.snell != nil {
 		v.snell.CloseAll()
+	}
+	if v.ssaead != nil {
+		v.ssaead.CloseAll()
+	}
+	if v.ssr != nil {
+		v.ssr.CloseAll()
 	}
 	if v.obfs != nil {
 		v.obfs.StopAll()

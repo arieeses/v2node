@@ -110,6 +110,34 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 		vc.snell.DelUsers(tag, uuids)
 		return nil
 	}
+	// shadowsocks extended-cipher node: same shape as snell.
+	if vc.ssaead.Has(tag) {
+		uuids := make([]string, 0, len(users))
+		for i := range users {
+			uuids = append(uuids, users[i].Uuid)
+			email := format.UserTag(tag, users[i].Uuid)
+			vc.users.uidMap.Delete(email)
+			if v, ok := vc.dispatcher.Counter.Load(tag); ok {
+				v.(*counter.TrafficCounter).Delete(email)
+			}
+		}
+		vc.ssaead.DelUsers(tag, uuids)
+		return nil
+	}
+	// shadowsocksr node: same shape as snell.
+	if vc.ssr.Has(tag) {
+		uuids := make([]string, 0, len(users))
+		for i := range users {
+			uuids = append(uuids, users[i].Uuid)
+			email := format.UserTag(tag, users[i].Uuid)
+			vc.users.uidMap.Delete(email)
+			if v, ok := vc.dispatcher.Counter.Load(tag); ok {
+				v.(*counter.TrafficCounter).Delete(email)
+			}
+		}
+		vc.ssr.DelUsers(tag, uuids)
+		return nil
+	}
 	userManager, err := vc.GetUserManager(tag)
 	if err != nil {
 		return fmt.Errorf("get user manager error: %s", err)
@@ -223,6 +251,22 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	}
 	if p.NodeInfo.Type == "snell" {
 		if err := v.snell.AddUsers(p.Tag, p.Users); err != nil {
+			return 0, err
+		}
+		return len(p.Users), nil
+	}
+	// shadowsocks extended-cipher (aegis-256, …): users live in the ssaead
+	// Runner (keyed by node tag in AddNode); uidMap above still resolves traffic.
+	if v.ssaead.Has(p.Tag) {
+		if err := v.ssaead.AddUsers(p.Tag, p.Users); err != nil {
+			return 0, err
+		}
+		return len(p.Users), nil
+	}
+	// shadowsocksr: users live in the SSR Runner's userID map (SPMU); uidMap
+	// above still resolves traffic accounting.
+	if p.NodeInfo.Type == "shadowsocksr" {
+		if err := v.ssr.AddUsers(p.Tag, p.Users); err != nil {
 			return 0, err
 		}
 		return len(p.Users), nil

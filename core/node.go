@@ -5,6 +5,7 @@ import (
 
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/singbox"
+	"github.com/wyx2685/v2node/common/ssaead"
 )
 
 func (v *V2Core) AddNode(tag string, info *panel.NodeInfo, disableSniffing bool) (err error) {
@@ -32,6 +33,21 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo, disableSniffing bool)
 
 	if info.Type == "snell" {
 		return v.snell.Add(tag, info)
+	}
+
+	// shadowsocks with an EXTENDED AEAD cipher (aegis-256, aes-gcm-siv, …) that
+	// Xray's native shadowsocks cannot do: terminate it via the shadowaead
+	// MultiService and bridge accepted streams into the dispatcher. Standard SS
+	// ciphers (aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305) fall through to
+	// the native Xray inbound below.
+	if info.Type == "shadowsocks" && ssaead.IsExtendedCipher(info.Common.Cipher) {
+		return v.ssaead.Add(tag, info)
+	}
+
+	// shadowsocksr: SSR terminates its own stream cipher + auth/obfs on its own
+	// listener and bridges each decoded stream into the dispatcher (SPMU).
+	if info.Type == "shadowsocksr" {
+		return v.ssr.Add(tag, info)
 	}
 
 	// Both shadow-tls and simple-obfs "tls" front the public port and bind the
@@ -109,6 +125,14 @@ func (v *V2Core) DelNode(tag string) error {
 	}
 	if v.snell.Has(tag) {
 		v.snell.Del(tag)
+		return nil
+	}
+	if v.ssaead.Has(tag) {
+		v.ssaead.Del(tag)
+		return nil
+	}
+	if v.ssr.Has(tag) {
+		v.ssr.Del(tag)
 		return nil
 	}
 	// Stop any front (sing-box shadow-tls / native obfs-tls) that owns the

@@ -35,6 +35,17 @@ const (
 	nonReusableEOFMessage = "end of file"
 )
 
+// SaltReplayCache is the first-record salt replay detector. It is EXPENSIVE to
+// initialize (two ~2.9MB Bloom generations, lazily on first use), so it MUST be
+// shared across all connections of a node — one per listener, injected via
+// ServiceOptions.SaltCache. The multi-user trial path creates a fresh *Service
+// per PSK per connection; without sharing, every successful handshake allocated
+// ~5.7MB of Bloom filters that were used once and thrown away, which at any real
+// handshake rate pinned the CPU in GC and starved the other protocols in the
+// process (and, being per-connection, detected no cross-connection replay at
+// all — useless as well as costly).
+type SaltReplayCache = saltReplayCache
+
 type saltReplayCache struct {
 	access  sync.Mutex
 	current int
@@ -136,13 +147,17 @@ type Service struct {
 	psk       []byte
 	obfs      snell.ObfsConfig
 	handler   snell.Handler
-	saltCache saltReplayCache
+	saltCache *saltReplayCache
 }
 
 type ServiceOptions struct {
 	PSK      []byte
 	ObfsMode snell.ObfsMode
 	Handler  snell.Handler
+	// SaltCache, when non-nil, is the SHARED salt-replay cache to use (one per
+	// node, allocated once). When nil the cache is disabled — no replay check and,
+	// crucially, no ~5.7MB per-connection Bloom allocation.
+	SaltCache *SaltReplayCache
 }
 
 func NewService(options ServiceOptions) (*Service, error) {
@@ -156,9 +171,10 @@ func NewService(options ServiceOptions) (*Service, error) {
 		return nil, E.New("snell: unknown obfs mode: ", int(options.ObfsMode))
 	}
 	return &Service{
-		psk:     options.PSK,
-		obfs:    snell.ObfsConfig{Mode: options.ObfsMode},
-		handler: options.Handler,
+		psk:       options.PSK,
+		obfs:      snell.ObfsConfig{Mode: options.ObfsMode},
+		handler:   options.Handler,
+		saltCache: options.SaltCache,
 	}, nil
 }
 
@@ -281,7 +297,7 @@ func (s *Service) newConnection(ctx context.Context, conn net.Conn, source M.Soc
 	}
 	// snell-server v5.0.1: initial request path: checks the first record salt after decryption
 	// and aborts with "Duplicated salt detected" when it was recently seen.
-	if s.saltCache.CheckAndAdd(salt) {
+	if s.saltCache != nil && s.saltCache.CheckAndAdd(salt) {
 		record.Release()
 		return errDuplicateSalt
 	}
@@ -355,7 +371,7 @@ func (s *MultiService[U]) newConnection(ctx context.Context, conn net.Conn, sour
 	}
 	// snell-server v5.0.1: initial request path: checks the first record salt after decryption
 	// and aborts with "Duplicated salt detected" when it was recently seen.
-	if s.saltCache.CheckAndAdd(salt) {
+	if s.saltCache != nil && s.saltCache.CheckAndAdd(salt) {
 		record.Release()
 		return errDuplicateSalt
 	}

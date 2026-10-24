@@ -266,7 +266,13 @@ func (c *Controller) nodeInfoMonitor(ctx context.Context) (err error) {
 	// where /proc/net parsing gave false "missing" and drove a rebuild loop). We
 	// do not test external reachability (that is the firewall's responsibility);
 	// we only detect the case where our own listener silently went away.
-	if c.info != nil && c.info.Common != nil && c.info.Common.ServerPort > 0 {
+	//
+	// Skip entirely when the node has no users: the lazy-listen protocols
+	// (snell/sudoku/mieru/shadowsocksr) only bind their port once the first user
+	// arrives, so a user-less node legitimately holds no listener. Probing it
+	// would see a free port and drive an endless (and pointless) rebuild loop on
+	// a node that carries no traffic. Once users exist the check runs as before.
+	if len(c.userList) > 0 && c.info != nil && c.info.Common != nil && c.info.Common.ServerPort > 0 {
 		udp := c.info.Type == "hysteria2" || c.info.Type == "tuic"
 		if !portBound(int(c.info.Common.ServerPort), udp) {
 			// Require two consecutive misses before the destructive rebuild, as a

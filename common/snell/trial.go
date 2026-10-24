@@ -40,27 +40,51 @@ type trialCred struct {
 type trialService struct {
 	runner *Runner
 	obfs   snell.ObfsMode
+	// salt is ONE shared salt-replay cache for the whole node. snellv5.NewService
+	// allocates its Bloom filters (~5.7MB) lazily on first use; the trial creates a
+	// fresh Service per PSK per connection, so WITHOUT sharing, every successful
+	// handshake allocated 5.7MB that was used once and GC'd — at any real handshake
+	// rate that pinned the CPU in garbage collection and starved the other protocols
+	// in the process. Shared, it is allocated once and the replay check actually
+	// works across connections.
+	salt *snellv5.SaltReplayCache
 
 	mu    sync.RWMutex
 	creds []trialCred
 }
 
 func newTrialService(runner *Runner, obfs snell.ObfsMode) *trialService {
-	return &trialService{runner: runner, obfs: obfs}
+	return &trialService{runner: runner, obfs: obfs, salt: &snellv5.SaltReplayCache{}}
 }
 
 // UpdateUsers rebuilds the (psk -> uuid) credential set. keys[i] is user i's PSK.
+// It PRESERVES the current trial order so the self-organizing hot set (see
+// promote) survives periodic user reconciles: users still present keep their
+// learned position (recently-active ones near the front), and newly-added users
+// are appended at the end.
 func (t *trialService) UpdateUsers(users []string, keys [][]byte) error {
-	creds := make([]trialCred, 0, len(users))
+	newSet := make(map[string][]byte, len(users))
 	for i := range users {
-		if i >= len(keys) || len(keys[i]) == 0 {
-			continue
+		if i < len(keys) && len(keys[i]) > 0 {
+			newSet[users[i]] = keys[i]
 		}
-		creds = append(creds, trialCred{psk: keys[i], uuid: users[i]})
 	}
 	t.mu.Lock()
+	defer t.mu.Unlock()
+	creds := make([]trialCred, 0, len(newSet))
+	seen := make(map[string]struct{}, len(newSet))
+	for _, c := range t.creds { // keep existing order (hot users stay near front)
+		if psk, ok := newSet[c.uuid]; ok {
+			creds = append(creds, trialCred{psk: psk, uuid: c.uuid})
+			seen[c.uuid] = struct{}{}
+		}
+	}
+	for uuid, psk := range newSet { // append newly-added users
+		if _, ok := seen[uuid]; !ok {
+			creds = append(creds, trialCred{psk: psk, uuid: uuid})
+		}
+	}
 	t.creds = creds
-	t.mu.Unlock()
 	return nil
 }
 
@@ -76,9 +100,10 @@ func (t *trialService) NewConnection(ctx context.Context, conn net.Conn, source 
 		rw.Rewind()
 		h := &trialHandler{runner: t.runner, uuid: creds[i].uuid, rw: rw}
 		svc, err := snellv5.NewService(snellv5.ServiceOptions{
-			PSK:      creds[i].psk,
-			ObfsMode: t.obfs,
-			Handler:  h,
+			PSK:       creds[i].psk,
+			ObfsMode:  t.obfs,
+			Handler:   h,
+			SaltCache: t.salt, // ONE shared cache per node — not 5.7MB per handshake
 		})
 		if err != nil {
 			continue
@@ -89,11 +114,47 @@ func (t *trialService) NewConnection(ctx context.Context, conn net.Conn, source 
 		// real (blocking) dispatch — so this returns only once the stream is done.
 		_ = svc.NewConnection(ctx, rw, source, onClose)
 		if h.invoked {
+			t.promote(creds[i].uuid)
 			return nil
 		}
 	}
 	_ = conn.Close()
 	return nil
+}
+
+// promote moves the matched user to the FRONT of the trial order — a classic
+// self-organizing (move-to-front) list. snell v4/v5 clients carry no user tag,
+// so identifying a user costs O(users) Argon2 trial-decryptions; without this,
+// a single client opening many connections (a browser loading one page opens
+// dozens) pays that O(users) cost on EVERY connection, saturating the CPU and
+// starving the other protocols sharing the process. With move-to-front, each
+// active user floats to the front, so a client's burst pays the full trial only
+// on its FIRST connection; the rest match on the first probe (1 Argon2). Measured
+// (2000 users, one user opening 20 connections, worst-case last position): 40000
+// trial-decryptions -> 2019 (~20x). Auth is unchanged: on a miss every user is
+// still tried; only the order changes. Copy-on-write keeps NewConnection's
+// snapshot lock-free while this reorders the shared slice.
+func (t *trialService) promote(uuid string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.creds) == 0 || t.creds[0].uuid == uuid {
+		return // already at front
+	}
+	idx := -1
+	for i := range t.creds {
+		if t.creds[i].uuid == uuid {
+			idx = i
+			break
+		}
+	}
+	if idx <= 0 {
+		return
+	}
+	nc := make([]trialCred, 0, len(t.creds))
+	nc = append(nc, t.creds[idx])
+	nc = append(nc, t.creds[:idx]...)
+	nc = append(nc, t.creds[idx+1:]...)
+	t.creds = nc
 }
 
 // trialHandler is a per-connection snell.Handler bound to the uuid of the PSK

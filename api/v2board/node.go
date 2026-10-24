@@ -167,10 +167,10 @@ func (c *Client) getNodeInfoV2(ctx context.Context) (node *NodeInfo, err error) 
 	case "vmess", "trojan", "anytls", "vless", "shadowflow":
 		node.Type = cm.Protocol
 		node.Security = cm.Tls
-	case "shadowsocks", "mieru", "snell", "sudoku":
+	case "shadowsocks", "mieru", "snell", "sudoku", "shadowsocksr":
 		// These terminate their own encryption (no Xray TLS layer): shadowsocks
-		// AEAD, mieru Mux, snell PSK, sudoku Ed25519-split. network_settings
-		// carries the per-protocol params (psk/master_key/etc).
+		// AEAD, mieru Mux, snell PSK, sudoku Ed25519-split, SSR stream cipher +
+		// auth/obfs. network_settings carries the per-protocol params.
 		node.Type = cm.Protocol
 		node.Security = 0
 	default:
