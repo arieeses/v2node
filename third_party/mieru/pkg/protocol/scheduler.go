@@ -19,15 +19,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/enfein/mieru/v3/pkg/cipher"
 	"github.com/enfein/mieru/v3/pkg/rng"
 )
 
 var (
 	// scheduleIdleTime determines when a underlay is considered idle.
-	// v2node patch: shortened from ~2-3min (cipher.KeyRefreshInterval + jitter)
-	// to ~30-60s so the server reaps empty underlays faster, lowering the
-	// steady-state pool a connection-pooling relay keeps refilling.
-	scheduleIdleTime = 30*time.Second + time.Duration(rng.FixedIntVH(31))*time.Second
+	scheduleIdleTime = cipher.KeyRefreshInterval + time.Duration(rng.FixedIntVH(61))*time.Second
 )
 
 // ScheduleController controls scheduling a new client session to a underlay.

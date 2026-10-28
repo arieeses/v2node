@@ -428,6 +428,9 @@ class ServerConfig:
             'users': [],
             'loggingLevel': 'INFO',
             'mtu': 1400,
+            'dns': {
+                'dualStack': 'PREFER_IPv4',
+            },
         }
 
 
@@ -1049,9 +1052,8 @@ def run_command(args: List[str], input=None, timeout=10, check=False, print_args
             print_exit(f'指令 {cpe.cmd} 的返回值为 {cpe.returncode}。输出：{cpe.output}')
         else:
             print_exit(f'Command {cpe.cmd} returned code {cpe.returncode}. Output: {cpe.output}')
-    finally:
-        if print_stdout and result.stdout:
-            print(result.stdout)
+    if print_stdout and result.stdout:
+        print(result.stdout)
     return result
 
 

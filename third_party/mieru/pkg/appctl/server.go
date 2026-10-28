@@ -89,15 +89,20 @@ func newServerProxy(config *pb.ServerConfig) (*serverProxy, error) {
 	if err != nil {
 		return nil, err
 	}
+	tcpIdleTimeout, err := appctlcommon.ParseServerTCPIdleTimeout(config.GetAdvancedSettings().GetTcpIdleTimeout())
+	if err != nil {
+		return nil, err
+	}
 	mux := protocol.NewMux(false).
 		SetTrafficPattern(trafficPattern).
 		SetServerUsers(appctlcommon.UserListToMap(config.GetUsers())).
-		SetServerUserHintIsMandatory(config.GetAdvancedSettings().GetUserHintIsMandatory())
+		SetServerUserHintIsMandatory(config.GetAdvancedSettings().GetUserHintIsMandatory()).
+		SetServerTCPIdleTimeout(tcpIdleTimeout)
 	mtu := common.DefaultMTU
 	if config.GetMtu() != 0 {
 		mtu = int(config.GetMtu())
 	}
-	endpoints, err := appctlcommon.PortBindingsToUnderlayProperties(config.GetPortBindings(), mtu)
+	endpoints, err := appctlcommon.AddrPortToUnderlayProperties(config.GetListenIPAddress(), config.GetPortBindings(), mtu)
 	if err != nil {
 		mux.Close()
 		return nil, err
@@ -300,22 +305,31 @@ func (s *serverManagementService) Reload(ctx context.Context, req *emptypb.Empty
 
 	mux := serverMuxRef.Load()
 	if mux != nil {
-		// Adjust portBindings.
+		// Adjust portBindings and listenIPAddress.
 		mtu := common.DefaultMTU
 		if config.GetMtu() != 0 {
 			mtu = int(config.GetMtu())
 		}
-		endpoints, err := appctlcommon.PortBindingsToUnderlayProperties(config.GetPortBindings(), mtu)
+		endpoints, err := appctlcommon.AddrPortToUnderlayProperties(config.GetListenIPAddress(), config.GetPortBindings(), mtu)
 		if err != nil {
 			return &emptypb.Empty{}, err
 		}
-		mux.SetEndpoints(endpoints)
+		if err := mux.UpdateEndpoints(endpoints); err != nil {
+			return &emptypb.Empty{}, fmt.Errorf("reload server listeners failed (use mita stop and mita start to change existing listeners): %w", err)
+		}
 
 		// Adjust users.
 		mux.SetServerUsers(appctlcommon.UserListToMap(config.GetUsers()))
 
 		// Adjust advanced settings: user hint is mandatory.
 		mux.SetServerUserHintIsMandatory(config.GetAdvancedSettings().GetUserHintIsMandatory())
+
+		// Adjust advanced settings: TCP idle timeout.
+		tcpIdleTimeout, err := appctlcommon.ParseServerTCPIdleTimeout(config.GetAdvancedSettings().GetTcpIdleTimeout())
+		if err != nil {
+			return &emptypb.Empty{}, err
+		}
+		mux.SetServerTCPIdleTimeout(tcpIdleTimeout)
 	}
 	log.Infof("completed Reload request from RPC caller")
 	return &emptypb.Empty{}, nil
@@ -566,32 +580,89 @@ func StoreServerConfig(config *pb.ServerConfig) error {
 	return nil
 }
 
-// ApplyJSONServerConfig applies user provided JSON server config from path.
-func ApplyJSONServerConfig(path string) error {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("os.ReadFile(%q) failed: %w", path, err)
+// MergeServerConfig merges the source server config into destination.
+// Source users are added or replace destination users with the same name.
+// Users omitted from source are preserved. Other supplied fields replace their
+// destination values. The caller must validate the patch and merged config.
+func MergeServerConfig(dst, src *pb.ServerConfig) error {
+	listenIPAddress := dst.ListenIPAddress
+	if src.ListenIPAddress != nil {
+		listenIPAddress = src.ListenIPAddress
 	}
-	s := &pb.ServerConfig{}
-	if err = common.UnmarshalJSON(b, s); err != nil {
-		return fmt.Errorf("common.UnmarshalJSON() failed: %w", err)
+
+	// Port bindings: if src is set, replace dst with src.
+	var portBindings []*pb.PortBinding
+	if src.PortBindings != nil {
+		portBindings = src.GetPortBindings()
+	} else {
+		portBindings = dst.GetPortBindings()
 	}
-	if err := ValidateServerConfigPatch(s); err != nil {
-		return fmt.Errorf("ValidateServerConfigPatch() failed: %w", err)
+
+	// Users: merge src into dst.
+	mergedUserMapping := map[string]*pb.User{}
+	for _, user := range dst.GetUsers() {
+		mergedUserMapping[user.GetName()] = user
 	}
-	config, err := LoadServerConfig()
-	if err != nil {
-		return fmt.Errorf("LoadServerConfig() failed: %w", err)
+	for _, user := range src.GetUsers() {
+		mergedUserMapping[user.GetName()] = user
 	}
-	if err = mergeServerConfig(config, s); err != nil {
-		return fmt.Errorf("mergeServerConfig() failed: %w", err)
+	names := make([]string, 0, len(mergedUserMapping))
+	for name := range mergedUserMapping {
+		names = append(names, name)
 	}
-	if err = ValidateFullServerConfig(config); err != nil {
-		return fmt.Errorf("ValidateFullServerConfig() failed: %w", err)
+	sort.Strings(names)
+	mergedUsers := make([]*pb.User, 0, len(mergedUserMapping))
+	for _, name := range names {
+		mergedUsers = append(mergedUsers, mergedUserMapping[name])
 	}
-	if err = StoreServerConfig(config); err != nil {
-		return fmt.Errorf("StoreServerConfig() failed: %w", err)
+
+	var advancedSettings *pb.ServerAdvancedSettings
+	if src.AdvancedSettings != nil {
+		advancedSettings = src.GetAdvancedSettings()
+	} else {
+		advancedSettings = dst.GetAdvancedSettings()
 	}
+	var loggingLevel pb.LoggingLevel
+	if src.LoggingLevel != nil {
+		loggingLevel = src.GetLoggingLevel()
+	} else {
+		loggingLevel = dst.GetLoggingLevel()
+	}
+	var mtu int32
+	if src.Mtu != nil {
+		mtu = src.GetMtu()
+	} else {
+		mtu = dst.GetMtu()
+	}
+	var egress *pb.Egress
+	if src.Egress != nil {
+		egress = src.GetEgress()
+	} else {
+		egress = dst.GetEgress()
+	}
+	var dns *pb.DNS
+	if src.Dns != nil {
+		dns = src.GetDns()
+	} else {
+		dns = dst.GetDns()
+	}
+	var trafficPattern *pb.TrafficPattern
+	if src.TrafficPattern != nil {
+		trafficPattern = src.GetTrafficPattern()
+	} else {
+		trafficPattern = dst.GetTrafficPattern()
+	}
+
+	proto.Reset(dst)
+	dst.ListenIPAddress = listenIPAddress
+	dst.PortBindings = portBindings
+	dst.Users = mergedUsers
+	dst.AdvancedSettings = advancedSettings
+	dst.LoggingLevel = &loggingLevel
+	dst.Mtu = proto.Int32(mtu)
+	dst.Egress = egress
+	dst.Dns = dns
+	dst.TrafficPattern = trafficPattern
 	return nil
 }
 
@@ -628,24 +699,30 @@ func DeleteServerUsers(names []string) error {
 // ValidateServerConfigPatch validates a patch of server config.
 //
 // A server config patch must satisfy:
-// 1. port bindings are valid
-// 2. users are valid
-// 3. if set, MTU is valid
-// 4. for each egress proxy
-// 4.1. name is not empty
-// 4.2. name is unique
-// 4.3. protocol is valid
-// 4.4. host is not empty
-// 4.5. port is valid
-// 4.6. if socks5 authentication is used, the user and password are not empty
-// 5. for each egress rule
-// 5.1. each IP range is either "*" or a valid IP CIDR
-// 5.2. each domain name is not empty, and does not begin or end with a dot
-// 5.3. if the action is "PROXY", the proxy is defined
-// 6. DNS host mapping is valid
-// 7. if set, metrics logging interval is valid, and it is not less than 1 second
-// 8. if set, traffic pattern is valid
+//   - if set, listen IP address is valid and has no zone identifier
+//   - port bindings are valid
+//   - users are valid
+//   - if set, MTU is valid
+//   - for each egress proxy:
+//     1. name is not empty
+//     2. name is unique
+//     3. protocol is not UNKNOWN_PROXY_PROTOCOL
+//     4. host is not empty
+//     5. port is valid
+//     6. socks5 authentication user and password are either both empty or both non-empty
+//   - for each egress rule:
+//     1. each IP range is either "*" or a valid IP CIDR
+//     2. each domain name is not empty, and does not begin or end with a dot
+//     3. if the action is "PROXY", the proxy name list is not empty and every named proxy is defined
+//     4. if the action is not "PROXY", the proxy name list is empty
+//   - DNS host mapping is valid
+//   - if set, metrics logging interval is valid, and it is not less than 1 second
+//   - if set, TCP idle timeout is valid, and it is not less than 1 minute
+//   - if set, traffic pattern is valid
 func ValidateServerConfigPatch(patch *pb.ServerConfig) error {
+	if err := appctlcommon.ValidateServerListenIPAddress(patch.GetListenIPAddress()); err != nil {
+		return err
+	}
 	if _, err := appctlcommon.FlatPortBindings(patch.GetPortBindings()); err != nil {
 		return err
 	}
@@ -730,6 +807,9 @@ func ValidateServerConfigPatch(patch *pb.ServerConfig) error {
 			return fmt.Errorf("metrics logging interval %q is less than 1 second", patch.GetAdvancedSettings().GetMetricsLoggingInterval())
 		}
 	}
+	if _, err := appctlcommon.ParseServerTCPIdleTimeout(patch.GetAdvancedSettings().GetTcpIdleTimeout()); err != nil {
+		return err
+	}
 	if err := trafficpattern.Validate(patch.GetTrafficPattern()); err != nil {
 		return fmt.Errorf("invalid traffic pattern: %w", err)
 	}
@@ -739,7 +819,8 @@ func ValidateServerConfigPatch(patch *pb.ServerConfig) error {
 // ValidateFullServerConfig validates the full server config.
 //
 // In addition to ValidateServerConfigPatch, it also validates:
-// 1. there is at least 1 port binding
+//   - the config is not empty
+//   - there is at least 1 port binding
 //
 // It is not an error if no user is configured. However mita won't be functional.
 func ValidateFullServerConfig(config *pb.ServerConfig) error {
@@ -780,84 +861,6 @@ func serverConfigFilePath() (string, ConfigFileType, error) {
 		return cachedServerConfigFilePath, FindConfigFileType(cachedServerConfigFilePath), nil
 	}
 	return "", INVALID_CONFIG_FILE_TYPE, fmt.Errorf("server config file path is empty")
-}
-
-// mergeServerConfig merges the source client config into destination.
-// If a user is specified in source, it is added to destination, or replacing existing user in destination.
-func mergeServerConfig(dst, src *pb.ServerConfig) error {
-	// Port bindings: if src is set, replace dst with src.
-	var portBindings []*pb.PortBinding
-	if src.PortBindings != nil {
-		portBindings = src.GetPortBindings()
-	} else {
-		portBindings = dst.GetPortBindings()
-	}
-
-	// Users: merge src into dst.
-	mergedUserMapping := map[string]*pb.User{}
-	for _, user := range dst.GetUsers() {
-		mergedUserMapping[user.GetName()] = user
-	}
-	for _, user := range src.GetUsers() {
-		mergedUserMapping[user.GetName()] = user
-	}
-	names := make([]string, 0, len(mergedUserMapping))
-	for name := range mergedUserMapping {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	mergedUsers := make([]*pb.User, 0, len(mergedUserMapping))
-	for _, name := range names {
-		mergedUsers = append(mergedUsers, mergedUserMapping[name])
-	}
-
-	var advancedSettings *pb.ServerAdvancedSettings
-	if src.AdvancedSettings != nil {
-		advancedSettings = src.GetAdvancedSettings()
-	} else {
-		advancedSettings = dst.GetAdvancedSettings()
-	}
-	var loggingLevel pb.LoggingLevel
-	if src.LoggingLevel != nil {
-		loggingLevel = src.GetLoggingLevel()
-	} else {
-		loggingLevel = dst.GetLoggingLevel()
-	}
-	var mtu int32
-	if src.Mtu != nil {
-		mtu = src.GetMtu()
-	} else {
-		mtu = dst.GetMtu()
-	}
-	var egress *pb.Egress
-	if src.Egress != nil {
-		egress = src.GetEgress()
-	} else {
-		egress = dst.GetEgress()
-	}
-	var dns *pb.DNS
-	if src.Dns != nil {
-		dns = src.GetDns()
-	} else {
-		dns = dst.GetDns()
-	}
-	var trafficPattern *pb.TrafficPattern
-	if src.TrafficPattern != nil {
-		trafficPattern = src.GetTrafficPattern()
-	} else {
-		trafficPattern = dst.GetTrafficPattern()
-	}
-
-	proto.Reset(dst)
-	dst.PortBindings = portBindings
-	dst.Users = mergedUsers
-	dst.AdvancedSettings = advancedSettings
-	dst.LoggingLevel = &loggingLevel
-	dst.Mtu = proto.Int32(mtu)
-	dst.Egress = egress
-	dst.Dns = dns
-	dst.TrafficPattern = trafficPattern
-	return nil
 }
 
 // deleteServerConfigFile deletes the server config file.

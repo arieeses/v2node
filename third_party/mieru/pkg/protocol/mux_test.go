@@ -27,11 +27,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/enfein/mieru/v3/internal/testtool"
 	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	"github.com/enfein/mieru/v3/pkg/cipher"
 	"github.com/enfein/mieru/v3/pkg/common"
 	"github.com/enfein/mieru/v3/pkg/log"
-	"github.com/enfein/mieru/v3/pkg/testtool"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -40,6 +40,68 @@ var users = map[string]*appctlpb.User{
 		Name:     proto.String("xiaochitang"),
 		Password: proto.String("kuiranbudong"),
 	},
+}
+
+func TestUpdateEndpointsListenerFailure(t *testing.T) {
+	for _, network := range []string{"tcp", "udp"} {
+		t.Run(network, func(t *testing.T) {
+			var occupied io.Closer
+			var occupiedAddr net.Addr
+			if network == "tcp" {
+				listener, err := net.Listen(network, "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				occupied, occupiedAddr = listener, listener.Addr()
+			} else {
+				conn, err := net.ListenPacket(network, "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				occupied, occupiedAddr = conn, conn.LocalAddr()
+			}
+			t.Cleanup(func() { occupied.Close() })
+			properties := func(ip string) UnderlayProperties {
+				if network == "tcp" {
+					return NewUnderlayProperties(1400, common.StreamTransport, &net.TCPAddr{IP: net.ParseIP(ip)}, nil)
+				}
+				return NewUnderlayProperties(1400, common.PacketTransport, &net.UDPAddr{IP: net.ParseIP(ip)}, nil)
+			}
+			original := properties("127.0.0.1")
+			added := properties("0.0.0.0")
+			blocked := NewUnderlayProperties(1400, original.TransportProtocol(), occupiedAddr, nil)
+			mux := NewMux(false).SetServerUsers(users).SetEndpoints([]UnderlayProperties{original})
+			t.Cleanup(func() { mux.Close() })
+			if err := mux.Start(); err != nil {
+				t.Fatal(err)
+			}
+
+			for i := 0; i < 2; i++ {
+				if err := mux.UpdateEndpoints([]UnderlayProperties{added, blocked}); err == nil {
+					t.Fatal("UpdateEndpoints() succeeded with an occupied port")
+				}
+				if want := []UnderlayProperties{original, added}; !reflect.DeepEqual(mux.endpoints, want) {
+					t.Fatalf("endpoints = %v, want %v", mux.endpoints, want)
+				}
+				if err := mux.acceptErr.get(); err != nil {
+					t.Fatalf("reload failure reached Accept(): %v", err)
+				}
+			}
+
+			if err := occupied.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := mux.UpdateEndpoints([]UnderlayProperties{added, blocked}); err != nil {
+				t.Fatalf("retry after releasing the port failed: %v", err)
+			}
+			if err := mux.UpdateEndpoints([]UnderlayProperties{original, added, blocked}); err != nil {
+				t.Fatalf("reloading existing listeners failed: %v", err)
+			}
+			if want := []UnderlayProperties{original, added, blocked}; !reflect.DeepEqual(mux.endpoints, want) {
+				t.Fatalf("endpoints = %v, want %v", mux.endpoints, want)
+			}
+		})
+	}
 }
 
 func runClient(t *testing.T, properties UnderlayProperties, username, password []byte, concurrent int) {

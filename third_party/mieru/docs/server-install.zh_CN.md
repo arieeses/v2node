@@ -18,32 +18,32 @@ sudo python3 setup.py --lang=zh
 
 ```sh
 # Debian / Ubuntu - X86_64
-curl -LSO https://github.com/enfein/mieru/releases/download/v3.36.0/mita_3.36.0_amd64.deb
+curl -LSO https://github.com/enfein/mieru/releases/download/v3.39.0/mita_3.39.0_amd64.deb
 
 # Debian / Ubuntu - ARM 64
-curl -LSO https://github.com/enfein/mieru/releases/download/v3.36.0/mita_3.36.0_arm64.deb
+curl -LSO https://github.com/enfein/mieru/releases/download/v3.39.0/mita_3.39.0_arm64.deb
 
 # RedHat / CentOS / Rocky Linux - X86_64
-curl -LSO https://github.com/enfein/mieru/releases/download/v3.36.0/mita-3.36.0-1.x86_64.rpm
+curl -LSO https://github.com/enfein/mieru/releases/download/v3.39.0/mita-3.39.0-1.x86_64.rpm
 
 # RedHat / CentOS / Rocky Linux - ARM 64
-curl -LSO https://github.com/enfein/mieru/releases/download/v3.36.0/mita-3.36.0-1.aarch64.rpm
+curl -LSO https://github.com/enfein/mieru/releases/download/v3.39.0/mita-3.39.0-1.aarch64.rpm
 ```
 
 ## 安装 mita 软件包
 
 ```sh
 # Debian / Ubuntu - X86_64
-sudo dpkg -i mita_3.36.0_amd64.deb
+sudo dpkg -i mita_3.39.0_amd64.deb
 
 # Debian / Ubuntu - ARM 64
-sudo dpkg -i mita_3.36.0_arm64.deb
+sudo dpkg -i mita_3.39.0_arm64.deb
 
 # RedHat / CentOS / Rocky Linux - X86_64
-sudo rpm -Uvh --force mita-3.36.0-1.x86_64.rpm
+sudo rpm -Uvh --force mita-3.39.0-1.x86_64.rpm
 
 # RedHat / CentOS / Rocky Linux - ARM 64
-sudo rpm -Uvh --force mita-3.36.0-1.aarch64.rpm
+sudo rpm -Uvh --force mita-3.39.0-1.aarch64.rpm
 ```
 
 上述指令也可以用来升级 mita 软件包的版本。
@@ -85,6 +85,12 @@ mita apply config <FILE>
 
 指令来修改代理服务器的设置，这里的 `<FILE>` 是一个 JSON 格式的配置文件。该配置文件不需要指定完整的代理服务器设置。运行指令 `mita apply config <FILE>` 时，文件内容会合并到任何已有的代理服务器设置。
 
+要替换整个已保存的配置，请提供含有完整代理服务器设置的 JSON 文件：
+
+```sh
+mita replace config <FILE>
+```
+
 下面是服务器配置文件的一个例子。
 
 ```js
@@ -110,7 +116,10 @@ mita apply config <FILE>
         }
     ],
     "loggingLevel": "INFO",
-    "mtu": 1400
+    "mtu": 1400,
+    "dns": {
+        "dualStack": "PREFER_IPv4"
+    }
 }
 ```
 
@@ -119,6 +128,7 @@ mita apply config <FILE>
 3. 在 `users` -> `name` 属性中填写用户名。
 4. 在 `users` -> `password` 属性中填写该用户的密码。
 5. 【可选】`mtu` 属性是使用 UDP 代理协议时，传输层最大的载荷大小。默认值是 1400，最小值是 1280。
+6. 【可选】建议将 `dns` -> `dualStack` 设置为 `PREFER_IPv4`，尤其是在服务器不支持 IPv6 时。其他选项和静态主机映射请参见 [DNS 策略](#dns-策略)。
 
 除此之外，mita 可以监听多个不同的端口。我们建议在服务器和客户端配置中使用多个端口。
 
@@ -160,17 +170,29 @@ mita status
 mita stop
 ```
 
-注意，每次使用 `mita apply config <FILE>` 修改设置后，需要用 `mita stop` 和 `mita start` 重启代理服务，才能使新设置生效。一个例外是，如果只修改了 `users` 或者 `loggingLevel` 设置，你可以使用 `mita reload` 加载新的设置，此时不会影响服务器与客户端的活跃连接。
+注意，每次使用 `mita apply config <FILE>` 或 `mita replace config <FILE>` 修改设置后，需要用 `mita stop` 和 `mita start` 重启代理服务，才能使新设置生效。一个例外是，如果只修改了 `users` 或者 `loggingLevel` 设置，你可以使用 `mita reload` 加载新的设置，此时不会影响服务器与客户端的活跃连接。
 
 启动代理服务后，请继续进行[客户端安装与配置](./client-install.zh_CN.md)。
 
 ## 高级设置
 
+### 监听 IP 地址
+
+默认情况下，mita 监听所有网络接口。将 `listenIPAddress` 属性设置为一个 IPv4 或 IPv6 地址，即可只监听该地址上的端口。例如，监听 `1.2.3.4`：
+
+```js
+{
+    "listenIPAddress": "1.2.3.4"
+}
+```
+
+将 `listenIPAddress` 设置为空字符串 `""`，即可重新监听所有网络接口。
+
+修改 `listenIPAddress` 后，必须依次运行 `mita stop` 和 `mita start`。`mita reload` 不会替换或关闭现有监听器。如果新监听器无法绑定地址（例如，旧监听器已占用该端口），重新加载会返回错误。
+
 ### BBR 拥塞控制算法
 
 [BBR](https://en.wikipedia.org/wiki/TCP_congestion_control#TCP_BBR) 是一种不依赖于丢包的拥塞控制算法。在恶劣的网络情况下，使用 BBR 的网络传输速度比传统算法更快。
-
-mieru 的 UDP 传输协议已经使用了 BBR 算法。
 
 运行以下脚本在 Linux 系统中让 TCP 传输协议使用 BBR 算法。
 
@@ -244,12 +266,12 @@ Tor 浏览器 -> mieru 客户端 -> GFW -> mita 服务器 -> Tor 网络 -> 目�
 
 ### DNS 策略
 
-当代理客户端请求的目标网站是域名时，代理服务器需要先解析域名对应的 IP 地址，然后连接目标网站。你可以使用下面的配置调整代理服务器的 DNS 策略：
+当代理客户端请求域名时，代理服务器会先解析域名，然后再建立连接。可以按如下方式配置 DNS 策略和静态主机映射：
 
 ```js
 {
     "dns": {
-        "dualStack": "USE_FIRST_IP",
+        "dualStack": "PREFER_IPv4",
         "hosts": {
             "example.com": "93.184.216.34",
             "ipv6.example.com": "2606:2800:220:1:248:1893:25c8:1946"
@@ -258,17 +280,15 @@ Tor 浏览器 -> mieru 客户端 -> GFW -> mita 服务器 -> Tor 网络 -> 目�
 }
 ```
 
-`dns` -> `dualStack` 属性支持的值包括：
+`dns` -> `dualStack` 属性支持以下值：
 
-1. `USE_FIRST_IP`：永远使用 DNS 服务器返回的第一个 IP 地址。这是默认策略。
-2. `PREFER_IPv4`：优先使用 DNS 服务器返回的第一个 IPv4 地址。如果没有 IPv4 地址，则使用第一个 IPv6 地址。
-3. `PREFER_IPv6`：优先使用 DNS 服务器返回的第一个 IPv6 地址。如果没有 IPv6 地址，则使用第一个 IPv4 地址。
-4. `ONLY_IPv4`：强制使用 DNS 服务器返回的第一个 IPv4 地址。如果没有 IPv4 地址则连接失败。
-5. `ONLY_IPv6`：强制使用 DNS 服务器返回的第一个 IPv6 地址。如果没有 IPv6 地址则连接失败。
+1. `USE_FIRST_IP`：使用 DNS 服务器返回的第一个 IP 地址。这是默认策略。
+2. `PREFER_IPv4`：优先使用 IPv4，然后回退到 IPv6。
+3. `PREFER_IPv6`：优先使用 IPv6，然后回退到 IPv4。
+4. `ONLY_IPv4`：仅使用 IPv4。如果没有可用的 IPv4 地址，则连接失败。
+5. `ONLY_IPv6`：仅使用 IPv6。如果没有可用的 IPv6 地址，则连接失败。
 
-`dns` -> `hosts` 属性定义静态的域名到 IP 地址映射，作用类似于 `/etc/hosts`。当代理服务器收到的请求域名列在 `hosts` 中时，会直接使用配置的 IP 地址，而不是查询 DNS 解析器。
-
-`hosts` 中的每个键必须是域名，每个值必须是有效的 IPv4 或 IPv6 地址。域名匹配是精确匹配，并且不区分大小写。不支持通配符或 DNS 后缀匹配。域名不能以点号开头或结尾。
+可选的 `dns` -> `hosts` 属性用于定义静态的域名到 IP 地址映射。每个键必须是域名，每个值必须是有效的 IPv4 或 IPv6 地址。域名采用精确匹配且不区分大小写；不支持通配符和 DNS 后缀匹配。域名不能以点号开头或结尾。
 
 ### 允许用户访问内网
 

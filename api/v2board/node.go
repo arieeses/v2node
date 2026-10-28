@@ -392,6 +392,16 @@ func (p *SSPlugin) Opt(k string) string {
 	return p.Opts[k]
 }
 
+// Has reports whether a plugin option key is present (value may be empty, e.g.
+// the bare "tls" flag of v2ray-plugin).
+func (p *SSPlugin) Has(k string) bool {
+	if p == nil {
+		return false
+	}
+	_, ok := p.Opts[k]
+	return ok
+}
+
 // ShadowsocksPlugin parses the SIP003 plugin carried in network_settings.
 // Returns nil when no plugin is configured.
 func (c *CommonNode) ShadowsocksPlugin() *SSPlugin {

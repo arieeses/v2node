@@ -6,6 +6,7 @@ import (
 	panel "github.com/wyx2685/v2node/api/v2board"
 	"github.com/wyx2685/v2node/common/singbox"
 	"github.com/wyx2685/v2node/common/ssaead"
+	"github.com/wyx2685/v2node/common/trojanss"
 )
 
 func (v *V2Core) AddNode(tag string, info *panel.NodeInfo, disableSniffing bool) (err error) {
@@ -48,6 +49,13 @@ func (v *V2Core) AddNode(tag string, info *panel.NodeInfo, disableSniffing bool)
 	// listener and bridges each decoded stream into the dispatcher (SPMU).
 	if info.Type == "shadowsocksr" {
 		return v.ssr.Add(tag, info)
+	}
+
+	// trojan + ss-obfs: trojan-go's shadowsocks-AEAD layer. Served on a native
+	// listener (optional TLS -> ss-aead -> trojan) instead of the Xray trojan
+	// inbound, which has no such layer.
+	if info.Type == "trojan" && trojanss.Enabled(info.Common.NetworkSettings) {
+		return v.trojanss.Add(tag, info)
 	}
 
 	// Both shadow-tls and simple-obfs "tls" front the public port and bind the
@@ -133,6 +141,10 @@ func (v *V2Core) DelNode(tag string) error {
 	}
 	if v.ssr.Has(tag) {
 		v.ssr.Del(tag)
+		return nil
+	}
+	if v.trojanss.Has(tag) {
+		v.trojanss.Del(tag)
 		return nil
 	}
 	// Stop any front (sing-box shadow-tls / native obfs-tls) that owns the

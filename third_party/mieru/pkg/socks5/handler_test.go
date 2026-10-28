@@ -12,10 +12,10 @@ import (
 
 	apicommon "github.com/enfein/mieru/v3/apis/common"
 	"github.com/enfein/mieru/v3/apis/constant"
+	"github.com/enfein/mieru/v3/internal/testtool"
 	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	"github.com/enfein/mieru/v3/pkg/egress"
 	"github.com/enfein/mieru/v3/pkg/stderror"
-	"github.com/enfein/mieru/v3/pkg/testtool"
 )
 
 type failResolver struct{}
@@ -584,6 +584,14 @@ func TestHandleForwardingUDP(t *testing.T) {
 		}
 		if reqHeader[1] != constant.Socks5UDPAssociateCmd {
 			t.Errorf("expected UDP associate command, got %v", reqHeader[1])
+			return
+		}
+		wantReqHeader := []byte{
+			constant.Socks5Version, constant.Socks5UDPAssociateCmd, 0, constant.Socks5IPv4Address,
+			0, 0, 0, 0, 0, 0,
+		}
+		if !bytes.Equal(reqHeader, wantReqHeader) {
+			t.Errorf("downstream got UDP associate request %v, want %v", reqHeader, wantReqHeader)
 			return
 		}
 

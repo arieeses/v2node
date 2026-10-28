@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"time"
 
 	apicommon "github.com/enfein/mieru/v3/apis/common"
@@ -29,9 +30,12 @@ import (
 
 // ClientDialer connects to upstream endpoints through a socks5 proxy.
 type ClientDialer struct {
-	ProxyAddress       string
-	Credential         *Credential
-	Timeout            time.Duration
+	ProxyAddress string
+	Credential   *Credential
+
+	// Timeout limits proxy TCP connection establishment and the SOCKS5 handshake.
+	Timeout time.Duration
+
 	Socks5UDPAssociate bool
 }
 
@@ -45,6 +49,17 @@ func NewClientDialer(proxyAddress string, credential *Credential, socks5UDPAssoc
 		Credential:         credential,
 		Socks5UDPAssociate: socks5UDPAssociate,
 	}
+}
+
+// NewClientDialerFromURI creates a socks5 client dialer from a URI in the
+// format "socks5://user:password@127.0.0.1:1080?timeout=5s".
+func NewClientDialerFromURI(proxyURI string, socks5UDPAssociate bool) (*ClientDialer, error) {
+	dialer, err := parseProxyURI(proxyURI)
+	if err != nil {
+		return nil, err
+	}
+	dialer.Socks5UDPAssociate = socks5UDPAssociate
+	return dialer, nil
 }
 
 // DialContext creates a stream connection through socks5 CONNECT.
@@ -103,7 +118,7 @@ func (d *ClientDialer) dial(ctx context.Context, cmd byte, network, laddr, raddr
 	if cmd != constant.Socks5ConnectCmd && cmd != constant.Socks5UDPAssociateCmd {
 		return nil, nil, nil, fmt.Errorf("socks5 command %d is not supported", cmd)
 	}
-	if d.Timeout > 0 {
+	if d.Timeout != 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, d.Timeout)
 		defer cancel()
@@ -237,6 +252,41 @@ func (c *clientPacketConn) SetWriteDeadline(t time.Time) error {
 	return c.udpConn.SetWriteDeadline(t)
 }
 
+// parseProxyURI parses a socks5 URI and creates a client dialer.
+func parseProxyURI(proxyURI string) (*ClientDialer, error) {
+	uri, err := url.Parse(proxyURI)
+	if err != nil {
+		return nil, err
+	}
+
+	c := &ClientDialer{}
+	if uri.Scheme != "socks5" {
+		return nil, fmt.Errorf("unsupported protocol %s", uri.Scheme)
+	}
+	c.ProxyAddress = uri.Host
+	user := uri.User.Username()
+	password, _ := uri.User.Password()
+	if user != "" || password != "" {
+		if user == "" || password == "" || len(user) > 255 || len(password) > 255 {
+			return nil, fmt.Errorf("invalid user name or password")
+		}
+		c.Credential = &Credential{
+			User:     user,
+			Password: password,
+		}
+	}
+	query := uri.Query()
+	timeout := query.Get("timeout")
+	if timeout != "" {
+		var err error
+		c.Timeout, err = time.ParseDuration(timeout)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return c, nil
+}
+
 func setConnDeadlineOnContextDone(ctx context.Context, conn net.Conn) func() {
 	done := ctx.Done()
 	if done == nil {
@@ -244,7 +294,9 @@ func setConnDeadlineOnContextDone(ctx context.Context, conn net.Conn) func() {
 	}
 
 	stop := make(chan struct{})
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		select {
 		case <-done:
 			conn.SetDeadline(time.Now())
@@ -253,5 +305,6 @@ func setConnDeadlineOnContextDone(ctx context.Context, conn net.Conn) func() {
 	}()
 	return func() {
 		close(stop)
+		<-stopped
 	}
 }

@@ -111,14 +111,26 @@ func (r *Runner) startLocked() error {
 	mux := mprotocol.NewMux(false)
 	mux.SetTrafficPattern(tp).
 		SetServerUsers(buildUserMap(r.users)).
-		SetServerUserHintIsMandatory(forceUserHint(r.info))
+		SetServerUserHintIsMandatory(forceUserHint(r.info)).
+		// Official opt-in idle-TCP close (mieru v3.39+). Default 0 = never close,
+		// identical to a stock mita server; replaces v2node's old scheduler patch.
+		SetServerTCPIdleTimeout(tcpIdleTimeout(r.info))
 	mux.SetEndpoints(endpoints)
 	if err := mux.Start(); err != nil {
 		return err
 	}
 	r.mux = mux
 	go r.acceptLoop(mux)
-	log.WithFields(log.Fields{"tag": r.tag, "port": r.info.Common.ServerPort}).Info("mieru server started")
+	// Echo the configured traffic pattern (base64 + decoded seed) so an operator
+	// can confirm which pattern is actually live after a panel change.
+	tpSeed := int32(0)
+	if pattern != nil {
+		tpSeed = pattern.GetSeed()
+	}
+	log.WithFields(log.Fields{
+		"tag": r.tag, "port": r.info.Common.ServerPort,
+		"transport": ns.Transport, "traffic_pattern": ns.TrafficPattern, "pattern_seed": tpSeed,
+	}).Info("mieru server started")
 	return nil
 }
 

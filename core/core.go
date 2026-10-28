@@ -12,6 +12,7 @@ import (
 	"github.com/wyx2685/v2node/common/snell"
 	"github.com/wyx2685/v2node/common/ssaead"
 	"github.com/wyx2685/v2node/common/ssr"
+	"github.com/wyx2685/v2node/common/trojanss"
 	"github.com/wyx2685/v2node/conf"
 	"github.com/wyx2685/v2node/core/app/dispatcher"
 	_ "github.com/wyx2685/v2node/core/distro/all"
@@ -47,6 +48,7 @@ type V2Core struct {
 	snell      *snell.Manager
 	ssaead     *ssaead.Manager
 	ssr        *ssr.Manager
+	trojanss   *trojanss.Manager
 	obfs       *obfs.Manager
 }
 
@@ -67,6 +69,7 @@ func New(config *conf.Conf) *V2Core {
 		snell:  snell.NewManager(),
 		ssaead: ssaead.NewManager(),
 		ssr:    ssr.NewManager(),
+		trojanss: trojanss.NewManager(),
 		obfs:   obfs.NewManager(),
 	}
 	return core
@@ -87,6 +90,7 @@ func (v *V2Core) Start(infos []*panel.NodeInfo) error {
 	v.snell.SetDispatcher(v.dispatcher)
 	v.ssaead.SetDispatcher(v.dispatcher)
 	v.ssr.SetDispatcher(v.dispatcher)
+	v.trojanss.SetDispatcher(v.dispatcher)
 	return nil
 }
 
@@ -110,6 +114,9 @@ func (v *V2Core) Close() error {
 	}
 	if v.ssr != nil {
 		v.ssr.CloseAll()
+	}
+	if v.trojanss != nil {
+		v.trojanss.CloseAll()
 	}
 	if v.obfs != nil {
 		v.obfs.StopAll()

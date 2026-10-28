@@ -17,6 +17,7 @@ package appctl
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -29,45 +30,89 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-func TestApply2ServerConfig(t *testing.T) {
-
-	beforeServerTest(t)
-
-	// Apply config1, and then apply config2.
-	configFile1 := "testdata/server_apply_config_1.json"
-	if err := ApplyJSONServerConfig(configFile1); err != nil {
-		t.Errorf("ApplyJSONServerConfig() failed: %v", err)
+func TestMergeServerConfig(t *testing.T) {
+	initial := &pb.ServerConfig{
+		PortBindings: []*pb.PortBinding{{Port: proto.Int32(8000), Protocol: pb.TransportProtocol_TCP.Enum()}},
+		Users: []*pb.User{{
+			Name:           proto.String("user1"),
+			Password:       proto.String("old-password"),
+			Quotas:         []*pb.Quota{{Days: proto.Int32(7), Megabytes: proto.Int32(1000)}},
+			AllowPrivateIP: proto.Bool(true),
+		}},
+		AdvancedSettings: &pb.ServerAdvancedSettings{
+			MetricsLoggingInterval: proto.String("30m"),
+		},
+		LoggingLevel:   pb.LoggingLevel_DEBUG.Enum(),
+		Mtu:            proto.Int32(1300),
+		TrafficPattern: &pb.TrafficPattern{Seed: proto.Int32(1)},
 	}
-	configFile2 := "testdata/server_apply_config_2.json"
-	if err := ApplyJSONServerConfig(configFile2); err != nil {
-		t.Errorf("ApplyJSONServerConfig() failed: %v", err)
+	replacement := &pb.ServerConfig{
+		PortBindings: []*pb.PortBinding{
+			{Port: proto.Int32(9000), Protocol: pb.TransportProtocol_TCP.Enum()},
+			{PortRange: proto.String("10000-11000"), Protocol: pb.TransportProtocol_UDP.Enum()},
+			{PortRange: proto.String("12000-13000"), Protocol: pb.TransportProtocol_TCP.Enum()},
+		},
+		Users: []*pb.User{
+			{Name: proto.String("user1"), Password: proto.String("new-password")},
+			{
+				Name:     proto.String("user2"),
+				Password: proto.String("password2"),
+				Quotas: []*pb.Quota{
+					{Days: proto.Int32(7), Megabytes: proto.Int32(1000)},
+					{Days: proto.Int32(30), Megabytes: proto.Int32(2000)},
+				},
+				AllowLoopbackIP: proto.Bool(true),
+			},
+		},
+		AdvancedSettings: &pb.ServerAdvancedSettings{
+			UserHintIsMandatory: proto.Bool(true),
+			TcpIdleTimeout:      proto.String("600s"),
+		},
+		LoggingLevel: pb.LoggingLevel_INFO.Enum(),
+		Mtu:          proto.Int32(1400),
+		Egress: &pb.Egress{
+			Proxies: []*pb.EgressProxy{{
+				Name: proto.String("proxy1"), Protocol: pb.ProxyProtocol_SOCKS5_PROXY_PROTOCOL.Enum(),
+				Host: proto.String("localhost"), Port: proto.Int32(1081),
+			}},
+			Rules: []*pb.EgressRule{
+				{IpRanges: []string{"8.8.8.8/32"}, Action: pb.EgressAction_REJECT.Enum()},
+				{DomainNames: []string{"example.com"}, Action: pb.EgressAction_PROXY.Enum(), ProxyNames: []string{"proxy1"}},
+				{IpRanges: []string{"*"}, DomainNames: []string{"*"}, Action: pb.EgressAction_DIRECT.Enum()},
+			},
+		},
+		Dns:            &pb.DNS{DualStack: pb.DualStack_PREFER_IPv4.Enum()},
+		TrafficPattern: &pb.TrafficPattern{Seed: proto.Int32(2)},
 	}
-	merged, err := LoadServerConfig()
-	if err != nil {
-		t.Errorf("LoadServerConfig() failed: %v", err)
+	cases := []struct {
+		name  string
+		dst   *pb.ServerConfig
+		patch *pb.ServerConfig
+		want  *pb.ServerConfig
+	}{
+		{"initialize", &pb.ServerConfig{}, replacement, replacement},
+		{"replace fields and users", initial, replacement, replacement},
+		{"preserve omitted fields", replacement, &pb.ServerConfig{}, replacement},
+		{"preserve omitted users", replacement, &pb.ServerConfig{Users: replacement.Users[:1]}, replacement},
 	}
-
-	// Apply only config2. The server config should be the same.
-	if err := deleteServerConfigFile(); err != nil {
-		t.Fatalf("failed to delete server config file")
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			config := proto.Clone(c.dst).(*pb.ServerConfig)
+			patch := proto.Clone(c.patch).(*pb.ServerConfig)
+			if err := ValidateServerConfigPatch(patch); err != nil {
+				t.Fatal(err)
+			}
+			if err := MergeServerConfig(config, patch); err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateFullServerConfig(config); err != nil {
+				t.Fatal(err)
+			}
+			if !proto.Equal(config, c.want) {
+				t.Errorf("merged config = %v, want %v", config, c.want)
+			}
+		})
 	}
-	if err := StoreServerConfig(&pb.ServerConfig{}); err != nil {
-		t.Fatalf("failed to create empty server config file")
-	}
-	if err := ApplyJSONServerConfig(configFile2); err != nil {
-		t.Errorf("ApplyJSONServerConfig() failed: %v", err)
-	}
-	want, err := LoadServerConfig()
-	if err != nil {
-		t.Errorf("LoadServerConfig() failed: %v", err)
-	}
-	if !proto.Equal(merged, want) {
-		mergedJSON, _ := common.MarshalJSON(merged)
-		wantJSON, _ := common.MarshalJSON(want)
-		t.Errorf("server config doesn't equal:\ngot = %v\nwant = %v", string(mergedJSON), string(wantJSON))
-	}
-
-	afterServerTest(t)
 }
 
 func TestServerApplyReject(t *testing.T) {
@@ -277,12 +322,14 @@ func TestServerApplyReject(t *testing.T) {
 }
 
 func TestServerDeleteUser(t *testing.T) {
-
 	beforeServerTest(t)
+	defer afterServerTest(t)
 
-	configFile := "testdata/server_apply_config_2.json"
-	if err := ApplyJSONServerConfig(configFile); err != nil {
-		t.Fatalf("ApplyJSONServerConfig() failed: %v", err)
+	if err := StoreServerConfig(&pb.ServerConfig{Users: []*pb.User{
+		{Name: proto.String("user1"), Password: proto.String("password1")},
+		{Name: proto.String("user2"), Password: proto.String("password2")},
+	}}); err != nil {
+		t.Fatalf("StoreServerConfig() failed: %v", err)
 	}
 
 	names := []string{"user2", "user3", "user4"}
@@ -294,30 +341,29 @@ func TestServerDeleteUser(t *testing.T) {
 		t.Fatalf("LoadServerConfig() failed: %v", err)
 	}
 	if len(config.GetUsers()) != 1 {
-		t.Errorf("want 1 user, got %d user(s)", len(config.GetUsers()))
+		t.Fatalf("want 1 user, got %d user(s)", len(config.GetUsers()))
 	}
 	if config.GetUsers()[0].GetName() != "user1" {
 		t.Errorf("want user name %q, got %q", "user1", config.GetUsers()[0].GetName())
 	}
-
-	afterServerTest(t)
 }
 
-func TestServerHashUserPassword(t *testing.T) {
-
+func TestStoreServerConfigHashesPasswords(t *testing.T) {
 	beforeServerTest(t)
+	defer afterServerTest(t)
 
-	configFile := "testdata/server_apply_config_1.json"
-	if err := ApplyJSONServerConfig(configFile); err != nil {
-		t.Errorf("ApplyJSONServerConfig() failed: %v", err)
+	if err := StoreServerConfig(&pb.ServerConfig{Users: []*pb.User{
+		{Name: proto.String("user1"), Password: proto.String("password1")},
+	}}); err != nil {
+		t.Fatalf("StoreServerConfig() failed: %v", err)
 	}
 	config, err := LoadServerConfig()
 	if err != nil {
-		t.Errorf("LoadServerConfig() failed: %v", err)
+		t.Fatalf("LoadServerConfig() failed: %v", err)
 	}
 	users := config.GetUsers()
-	if len(users) == 0 {
-		t.Errorf("no user found in server config")
+	if len(users) != 1 {
+		t.Fatalf("want 1 user, got %d user(s)", len(users))
 	}
 	for _, user := range users {
 		if user.GetPassword() != "" {
@@ -327,8 +373,6 @@ func TestServerHashUserPassword(t *testing.T) {
 			t.Errorf("user %q has no hashed password", user.GetName())
 		}
 	}
-
-	afterServerTest(t)
 }
 
 func TestServerStopClearsMuxRef(t *testing.T) {
@@ -464,4 +508,189 @@ func afterServerTest(t *testing.T) {
 	if err := deleteServerConfigFile(); err != nil {
 		t.Fatalf("failed to clean server config file after the test")
 	}
+}
+
+func TestServerListenIPAddressConfig(t *testing.T) {
+	config := &pb.ServerConfig{
+		PortBindings: []*pb.PortBinding{{Port: proto.Int32(8000), Protocol: pb.TransportProtocol_TCP.Enum()}},
+	}
+	cases := []struct {
+		name    string
+		patch   string
+		want    *string
+		wantErr bool
+	}{
+		{"unset", `{}`, nil, false},
+		{"set IPv4", `{"listenIPAddress":"127.0.0.1"}`, proto.String("127.0.0.1"), false},
+		{"preserve", `{"loggingLevel":"INFO"}`, proto.String("127.0.0.1"), false},
+		{"replace IPv6", `{"listenIPAddress":"::1"}`, proto.String("::1"), false},
+		{"invalid hostname", `{"listenIPAddress":"localhost"}`, proto.String("::1"), true},
+		{"invalid IP", `{"listenIPAddress":"300.1.2.3"}`, proto.String("::1"), true},
+		{"invalid port", `{"listenIPAddress":"127.0.0.1:80"}`, proto.String("::1"), true},
+		{"invalid brackets", `{"listenIPAddress":"[::1]"}`, proto.String("::1"), true},
+		{"reset", `{"listenIPAddress":""}`, proto.String(""), false},
+		{"preserve reset", `{}`, proto.String(""), false},
+		{"IPv4 wildcard", `{"listenIPAddress":"0.0.0.0"}`, proto.String("0.0.0.0"), false},
+		{"IPv6 wildcard", `{"listenIPAddress":"::"}`, proto.String("::"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			patch := &pb.ServerConfig{}
+			if err := common.UnmarshalJSON([]byte(c.patch), patch); err != nil {
+				t.Fatal(err)
+			}
+			full := proto.Clone(patch).(*pb.ServerConfig)
+			full.PortBindings = []*pb.PortBinding{{Port: proto.Int32(8000), Protocol: pb.TransportProtocol_TCP.Enum()}}
+			for _, err := range []error{ValidateServerConfigPatch(patch), ValidateFullServerConfig(full)} {
+				if (err != nil) != c.wantErr {
+					t.Fatalf("validation error = %v, want error %v", err, c.wantErr)
+				}
+			}
+			if c.wantErr {
+				return
+			}
+			if err := MergeServerConfig(config, patch); err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateFullServerConfig(config); err != nil {
+				t.Fatal(err)
+			}
+			if c.want == nil {
+				if config.ListenIPAddress != nil {
+					t.Fatalf("address = %q, want absent", config.GetListenIPAddress())
+				}
+			} else if config.ListenIPAddress == nil || config.GetListenIPAddress() != *c.want {
+				t.Fatalf("address = %v (%q), want %q", config.ListenIPAddress, config.GetListenIPAddress(), *c.want)
+			}
+		})
+	}
+}
+
+func TestServerReloadListenIPAddressConflict(t *testing.T) {
+	beforeServerTest(t)
+	defer afterServerTest(t)
+	for _, transport := range []pb.TransportProtocol{pb.TransportProtocol_TCP, pb.TransportProtocol_UDP} {
+		for _, address := range []string{"", "127.0.0.1"} {
+			t.Run(fmt.Sprintf("%s/address=%s", transport, address), func(t *testing.T) {
+				var port int
+				var err error
+				if transport == pb.TransportProtocol_TCP {
+					port, err = common.UnusedTCPPort()
+				} else {
+					port, err = common.UnusedUDPPort()
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				config := &pb.ServerConfig{
+					ListenIPAddress: proto.String(address),
+					Users:           []*pb.User{{Name: proto.String("user"), Password: proto.String("password")}},
+					PortBindings:    []*pb.PortBinding{{Port: proto.Int32(int32(port)), Protocol: transport.Enum()}},
+				}
+				proxy, err := newServerProxy(config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Disable port reuse so overlapping addresses reliably fail to bind.
+				factory := &net.ListenConfig{}
+				proxy.mux.SetStreamListenerFactory(factory).SetPacketListenerFactory(factory)
+				t.Cleanup(func() {
+					SetServerMuxRef(nil)
+					proxy.mux.Close()
+				})
+				if err := proxy.mux.Start(); err != nil {
+					t.Fatal(err)
+				}
+				SetServerMuxRef(proxy.mux)
+				if address == "" {
+					config.ListenIPAddress = proto.String("127.0.0.1")
+				} else {
+					config.ListenIPAddress = proto.String("")
+				}
+				if err := StoreServerConfig(config); err != nil {
+					t.Fatal(err)
+				}
+				service := NewServerManagementService()
+				for i := 0; i < 2; i++ {
+					if _, err := service.Reload(context.Background(), &emptypb.Empty{}); err == nil {
+						t.Fatal("Reload() succeeded with a conflicting listenIPAddress")
+					} else if !strings.Contains(err.Error(), "mita stop and mita start") {
+						t.Fatalf("Reload() error lacks restart instructions: %v", err)
+					}
+				}
+				config.ListenIPAddress = proto.String(address)
+				if err := StoreServerConfig(config); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := service.Reload(context.Background(), &emptypb.Empty{}); err != nil {
+					t.Fatalf("Reload() failed after restoring the original address: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestServerProxyListenIPAddress(t *testing.T) {
+	beforeServerTest(t)
+	defer afterServerTest(t)
+	for _, reload := range []bool{false, true} {
+		for _, address := range []string{"", "127.0.0.1", "::1"} {
+			t.Run(fmt.Sprintf("reload=%v/address=%s", reload, address), func(t *testing.T) {
+				config := &pb.ServerConfig{
+					ListenIPAddress: proto.String(address),
+					Users:           []*pb.User{{Name: proto.String("user"), Password: proto.String("password")}},
+					PortBindings: []*pb.PortBinding{
+						{Port: proto.Int32(8000), Protocol: pb.TransportProtocol_TCP.Enum()},
+						{Port: proto.Int32(8000), Protocol: pb.TransportProtocol_UDP.Enum()},
+					},
+				}
+				var mux *protocol.Mux
+				if reload {
+					mux = protocol.NewMux(false)
+					SetServerMuxRef(mux)
+					t.Cleanup(func() { SetServerMuxRef(nil) })
+					if err := StoreServerConfig(config); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := NewServerManagementService().Reload(context.Background(), &emptypb.Empty{}); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					proxy, err := newServerProxy(config)
+					if err != nil {
+						t.Fatal(err)
+					}
+					mux = proxy.mux
+				}
+				t.Cleanup(func() { mux.Close() })
+				factory := &recordingListenerFactory{addresses: make(chan string, 2)}
+				mux.SetStreamListenerFactory(factory).SetPacketListenerFactory(factory)
+				if err := mux.Start(); err == nil {
+					t.Fatal("Start() succeeded with failing listener factory")
+				}
+				for i := 0; i < 2; i++ {
+					select {
+					case got := <-factory.addresses:
+						if want := net.JoinHostPort(address, "8000"); got != want {
+							t.Errorf("listener address = %q, want %q", got, want)
+						}
+					default:
+						t.Fatal("listener factory was not called")
+					}
+				}
+			})
+		}
+	}
+}
+
+type recordingListenerFactory struct{ addresses chan string }
+
+func (f *recordingListenerFactory) Listen(_ context.Context, _, address string) (net.Listener, error) {
+	f.addresses <- address
+	return nil, fmt.Errorf("test listener failure")
+}
+
+func (f *recordingListenerFactory) ListenPacket(_ context.Context, _, address string) (net.PacketConn, error) {
+	f.addresses <- address
+	return nil, fmt.Errorf("test listener failure")
 }

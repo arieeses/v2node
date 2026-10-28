@@ -31,7 +31,6 @@ import (
 	"time"
 
 	apicommon "github.com/enfein/mieru/v3/apis/common"
-	"github.com/enfein/mieru/v3/apis/constant"
 	"github.com/enfein/mieru/v3/apis/trafficpattern"
 	"github.com/enfein/mieru/v3/pkg/appctl"
 	"github.com/enfein/mieru/v3/pkg/appctl/appctlcommon"
@@ -50,6 +49,11 @@ import (
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/emptypb"
+)
+
+const (
+	clientStartTimeout      = 10 * time.Second
+	clientStartPollInterval = 100 * time.Millisecond
 )
 
 // RegisterClientCommands registers all the client side CLI commands.
@@ -115,6 +119,18 @@ func RegisterClientCommands() {
 			return nil
 		},
 		clientApplyConfigFunc,
+	)
+	RegisterCallback(
+		[]string{"", "replace", "config"},
+		func(s []string) error {
+			if len(s) < 4 {
+				return fmt.Errorf("usage: mieru replace config <FILE>. No config file is provided")
+			} else if len(s) > 4 {
+				return fmt.Errorf("usage: mieru replace config <FILE>. More than 1 config file is provided")
+			}
+			return nil
+		},
+		clientReplaceConfigFunc,
 	)
 	RegisterCallback(
 		[]string{"", "describe", "config"},
@@ -327,6 +343,13 @@ var clientHelpFunc = func(s []string) error {
 				},
 			},
 			{
+				cmd: "replace config <JSON_FILE>",
+				help: []string{
+					"Replace saved client configuration with a complete JSON file.",
+					"Omitted settings and profiles are removed.",
+				},
+			},
+			{
 				cmd:  "describe config",
 				help: []string{"Show current client configuration."},
 			},
@@ -454,7 +477,11 @@ var clientStartFunc = func(s []string) error {
 		return fmt.Errorf(stderror.ValidateFullClientConfigFailedErr, err)
 	}
 
-	if err = appctl.IsClientDaemonRunning(context.Background()); err == nil {
+	ctx, cancelFunc := context.WithTimeout(context.Background(), clientStartTimeout)
+	defer cancelFunc()
+
+	appStatus, statusErr := appctl.GetClientStatusWithRPC(ctx)
+	if statusErr == nil && appStatus.GetStatus() == appctlpb.AppStatus_RUNNING {
 		if config.GetSocks5ListenLAN() {
 			log.Infof("mieru client is running, listening to socks5://0.0.0.0:%d", config.GetSocks5Port())
 		} else {
@@ -463,40 +490,59 @@ var clientStartFunc = func(s []string) error {
 		return nil
 	}
 
-	cmd := exec.Command(s[0], "run")
-	if errors.Is(cmd.Err, exec.ErrDot) {
-		cmd.Err = nil
-	}
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf(stderror.StartClientFailedErr, err)
+	// If the RPC server is reachable, the daemon is already starting.
+	// Wait for it instead of launching a second daemon.
+	if statusErr != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf(stderror.ClientNotRunningErr, statusErr)
+		}
+		cmd := exec.Command(s[0], "run")
+		if errors.Is(cmd.Err, exec.ErrDot) {
+			cmd.Err = nil
+		}
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf(stderror.StartClientFailedErr, err)
+		}
 	}
 
-	// Wait until client daemon is running.
-	// The maximum waiting time is 10 seconds.
-	var lastErr error
-	for i := 0; i < 100; i++ {
-		lastErr = appctl.IsClientDaemonRunning(context.Background())
-		if lastErr == nil {
+	// Wait until the client reaches the RUNNING state.
+	lastErr := statusErr
+	pollTicker := time.NewTicker(clientStartPollInterval)
+	defer pollTicker.Stop()
+	for {
+		appStatus, statusErr = appctl.GetClientStatusWithRPC(ctx)
+		if statusErr == nil && appStatus.GetStatus() == appctlpb.AppStatus_RUNNING {
 			if config.GetSocks5ListenLAN() {
 				log.Infof("mieru client is started, listening to socks5://0.0.0.0:%d", config.GetSocks5Port())
 			} else {
 				log.Infof("mieru client is started, listening to socks5://127.0.0.1:%d", config.GetSocks5Port())
 			}
 
-			if should, _ := clientShouldCheckUpdate(config); should {
-				msg, _ := clientCheckUpdateAndUpdateHistory(fmt.Sprintf("socks5://127.0.0.1:%d", config.GetSocks5Port()))
-				if msg != updater.UpToDateMessage {
-					log.Infof("")
-					log.Infof(msg)
+			if ctx.Err() == nil {
+				if should, _ := clientShouldCheckUpdate(config); should && ctx.Err() == nil {
+					msg, checkErr := clientCheckUpdateAndUpdateHistory(ctx, fmt.Sprintf("socks5://127.0.0.1:%d", config.GetSocks5Port()))
+					if checkErr == nil && msg != updater.UpToDateMessage {
+						log.Infof("")
+						log.Infof(msg)
+					}
 				}
 			}
 			return nil
 		}
-		time.Sleep(100 * time.Millisecond)
+		if statusErr != nil {
+			lastErr = statusErr
+		} else {
+			lastErr = fmt.Errorf("mieru client status is %q", appStatus.GetStatus().String())
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf(stderror.ClientNotRunningErr, lastErr)
+		case <-pollTicker.C:
+		}
 	}
-	return fmt.Errorf(stderror.ClientNotRunningErr, lastErr)
 }
 
 var clientRunFunc = func(s []string) error {
@@ -627,7 +673,7 @@ var clientRunFunc = func(s []string) error {
 	// Run the local socks5 server in the background.
 	var socks5Addr string
 	if config.GetSocks5ListenLAN() {
-		socks5Addr = common.MaybeDecorateIPv6(common.AllIPAddr()) + ":" + strconv.Itoa(int(config.GetSocks5Port()))
+		socks5Addr = net.JoinHostPort("", strconv.Itoa(int(config.GetSocks5Port())))
 	} else {
 		socks5Addr = common.MaybeDecorateIPv6(common.LocalIPAddr()) + ":" + strconv.Itoa(int(config.GetSocks5Port()))
 	}
@@ -660,22 +706,23 @@ var clientRunFunc = func(s []string) error {
 			log.Fatalf(`HTTP(S) proxy is not compatible with socks5 user password authentication. Please run "mieru delete socks5 authentication" to stop using user password authentication, or run "mieru delete http proxy" command to stop using HTTP(S) proxy.`)
 		}
 		wg.Add(1)
-		go func(socks5Addr string) {
+		go func() {
 			var httpServerAddr string
 			if config.GetHttpProxyListenLAN() {
-				httpServerAddr = common.MaybeDecorateIPv6(common.AllIPAddr()) + ":" + strconv.Itoa(int(config.GetHttpProxyPort()))
+				httpServerAddr = net.JoinHostPort("", strconv.Itoa(int(config.GetHttpProxyPort())))
 			} else {
 				httpServerAddr = common.MaybeDecorateIPv6(common.LocalIPAddr()) + ":" + strconv.Itoa(int(config.GetHttpProxyPort()))
 			}
+			socks5DialAddr := net.JoinHostPort(common.LocalIPAddr(), strconv.Itoa(int(config.GetSocks5Port())))
 			httpServer := socks5.NewHTTPProxyServer(httpServerAddr, &socks5.HTTPProxy{
-				ProxyURI: "socks5://" + socks5Addr + "?timeout=10s",
+				ProxyURI: "socks5://" + socks5DialAddr + "?timeout=10s",
 			})
 			log.Infof("mieru client HTTP proxy server is running")
 			wg.Done()
 			if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Fatalf("run HTTP proxy server failed: %v", err)
 			}
-		}(socks5Addr)
+		}()
 	}
 
 	<-appctl.ClientSocks5ServerStarted
@@ -747,9 +794,10 @@ var clientTestFunc = func(s []string) error {
 		return fmt.Errorf(stderror.GetClientConfigFailedErr, err)
 	}
 
+	dialer := socks5.NewClientDialer(net.JoinHostPort("127.0.0.1", strconv.Itoa(int(config.GetSocks5Port()))), nil, false)
 	httpClient := &http.Client{
 		Transport: &http.Transport{
-			Dial: socks5.Dial(fmt.Sprintf("socks5://127.0.0.1:%d", config.GetSocks5Port()), constant.Socks5ConnectCmd),
+			DialContext: dialer.DialContext,
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return nil
@@ -785,6 +833,10 @@ var clientApplyConfigFunc = func(s []string) error {
 		}
 	}
 	return appctl.ApplyJSONClientConfig(s[3])
+}
+
+var clientReplaceConfigFunc = func(s []string) error {
+	return appctl.ReplaceJSONClientConfig(s[3])
 }
 
 var clientDescribeConfigFunc = func(s []string) error {
@@ -946,8 +998,11 @@ var clientDeleteSocks5AuthenticationFunc = func(_ []string) error {
 }
 
 var clientCheckUpdateFunc = func(s []string) error {
+	ctx, cancelFunc := context.WithTimeout(context.Background(), checkUpdateTimeout)
+	defer cancelFunc()
+
 	var socks5ProxyURI string
-	if err := appctl.IsClientDaemonRunning(context.Background()); err == nil {
+	if err := appctl.IsClientDaemonRunning(ctx); err == nil {
 		// Client is running. Use the socks5 proxy to check update.
 		config, err := appctl.LoadClientConfig()
 		if err == nil {
@@ -956,7 +1011,7 @@ var clientCheckUpdateFunc = func(s []string) error {
 		// Otherwise, silently drop the error.
 	}
 
-	msg, err := clientCheckUpdateAndUpdateHistory(socks5ProxyURI)
+	msg, err := clientCheckUpdateAndUpdateHistory(ctx, socks5ProxyURI)
 	if err != nil {
 		if socks5ProxyURI == "" {
 			return fmt.Errorf("check update without proxy failed: %w; please start mieru proxy client and try again", err)
@@ -1130,14 +1185,19 @@ func clientShouldCheckUpdate(config *appctlpb.ClientConfig) (bool, error) {
 	return h.ShouldCheckUpdate(), nil
 }
 
-func clientCheckUpdateAndUpdateHistory(socks5ProxyURI string) (string, error) {
+func clientCheckUpdateAndUpdateHistory(ctx context.Context, socks5ProxyURI string) (string, error) {
 	historyFile, err := appctl.ClientUpdaterHistoryPath()
 	if err != nil {
 		return "", fmt.Errorf("failed to get client updater history file path")
 	}
 	h := updater.NewHistory()
 	h.LoadFrom(historyFile) // OK to fail. No side effect.
-	record, msg, checkErr := updater.CheckUpdate(socks5ProxyURI)
+	record, msg, checkErr := updater.CheckUpdate(ctx, socks5ProxyURI)
+	// A canceled startup check did not get a full opportunity to query the
+	// update service. Do not let it suppress the next scheduled check.
+	if ctx.Err() != nil {
+		return msg, checkErr
+	}
 	h.Insert(record)
 	h.Trim()
 	h.StoreTo(historyFile) // OK to fail.

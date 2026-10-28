@@ -84,6 +84,10 @@ func (ms *mieruServer) Start() error {
 		return ErrNoServerConfig
 	}
 
+	tcpIdleTimeout, err := appctlcommon.ParseServerTCPIdleTimeout(ms.config.Config.GetAdvancedSettings().GetTcpIdleTimeout())
+	if err != nil {
+		return err
+	}
 	ms.mux = protocol.NewMux(false)
 	if ms.config.StreamListenerFactory != nil {
 		ms.mux.SetStreamListenerFactory(ms.config.StreamListenerFactory)
@@ -97,12 +101,13 @@ func (ms *mieruServer) Start() error {
 	}
 	ms.mux.SetTrafficPattern(trafficPattern).
 		SetServerUsers(appctlcommon.UserListToMap(ms.config.Config.GetUsers())).
-		SetServerUserHintIsMandatory(ms.config.Config.GetAdvancedSettings().GetUserHintIsMandatory())
+		SetServerUserHintIsMandatory(ms.config.Config.GetAdvancedSettings().GetUserHintIsMandatory()).
+		SetServerTCPIdleTimeout(tcpIdleTimeout)
 	mtu := common.DefaultMTU
 	if ms.config.Config.GetMtu() != 0 {
 		mtu = int(ms.config.Config.GetMtu())
 	}
-	endpoints, err := appctlcommon.PortBindingsToUnderlayProperties(ms.config.Config.GetPortBindings(), mtu)
+	endpoints, err := appctlcommon.AddrPortToUnderlayProperties(ms.config.Config.GetListenIPAddress(), ms.config.Config.GetPortBindings(), mtu)
 	if err != nil {
 		return err
 	}
@@ -153,6 +158,9 @@ func validateServerConfig(config *appctlpb.ServerConfig) error {
 	if config == nil {
 		return fmt.Errorf("server config is nil")
 	}
+	if err := appctlcommon.ValidateServerListenIPAddress(config.GetListenIPAddress()); err != nil {
+		return err
+	}
 	if len(config.GetPortBindings()) == 0 {
 		return fmt.Errorf("server port bindings are not set")
 	}
@@ -169,6 +177,9 @@ func validateServerConfig(config *appctlpb.ServerConfig) error {
 	}
 	if config.Egress != nil {
 		return fmt.Errorf("egress is not allowed")
+	}
+	if _, err := appctlcommon.ParseServerTCPIdleTimeout(config.GetAdvancedSettings().GetTcpIdleTimeout()); err != nil {
+		return err
 	}
 	if err := trafficpattern.Validate(config.TrafficPattern); err != nil {
 		return fmt.Errorf("invalid traffic pattern: %w", err)

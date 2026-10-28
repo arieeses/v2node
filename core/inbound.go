@@ -535,7 +535,24 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 	//                   from AddNode) terminates the TLS layer on the public port.
 	if plugin := s.ShadowsocksPlugin(); plugin != nil {
 		switch plugin.Name {
-		case "v2ray-plugin":
+		case "v2ray-plugin", "gost-plugin":
+			// Both carry Shadowsocks over a standard WebSocket, so both map to the
+			// Xray ws inbound. Config conventions differ a little: v2ray-plugin and
+			// mihomo's gost-plugin use mode=websocket + a bare "tls" flag for wss;
+			// the original gost-plugin binary uses mode=ws|wss. We accept all of
+			// them. When wss/tls is requested we add a TLS layer on the ws inbound
+			// using the node's own certificate.
+			//
+			// NOTE: gost-plugin's mux (smux over ws) is NOT compatible with the Xray
+			// ws inbound — the client MUST set mux=false (plain websocket).
+			wantTLS := plugin.Has("tls")
+			switch plugin.Opt("mode") {
+			case "", "websocket", "ws":
+			case "wss":
+				wantTLS = true
+			default:
+				return fmt.Errorf("%s mode %q not supported (only websocket/ws/wss)", plugin.Name, plugin.Opt("mode"))
+			}
 			path := plugin.Opt("path")
 			if path == "" {
 				path = "/"
@@ -553,6 +570,23 @@ func buildShadowsocks(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourC
 			}
 			if err := json.Unmarshal(wsCfg, &inbound.StreamSetting.WSSettings); err != nil {
 				return fmt.Errorf("build shadowsocks ws settings error: %s", err)
+			}
+			if wantTLS {
+				if nodeInfo.Common.CertInfo == nil {
+					return fmt.Errorf("shadowsocks %s wss requires a certificate", plugin.Name)
+				}
+				inbound.StreamSetting.Security = "tls"
+				inbound.StreamSetting.TLSSettings = &coreConf.TLSConfig{
+					Certs: []*coreConf.TLSCertConfig{
+						{
+							CertFile:       nodeInfo.Common.CertInfo.CertFile,
+							KeyFile:        nodeInfo.Common.CertInfo.KeyFile,
+							OcspStapling:   0,
+							OneTimeLoading: true,
+						},
+					},
+					RejectUnknownSNI: nodeInfo.Common.CertInfo.RejectUnknownSni,
+				}
 			}
 			sets, err := json.Marshal(settings)
 			if err != nil {

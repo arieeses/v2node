@@ -138,6 +138,20 @@ func (vc *V2Core) DelUsers(users []panel.UserInfo, tag string, _ *panel.NodeInfo
 		vc.ssr.DelUsers(tag, uuids)
 		return nil
 	}
+	// trojan + ss-obfs node: same shape as snell/ssr.
+	if vc.trojanss.Has(tag) {
+		uuids := make([]string, 0, len(users))
+		for i := range users {
+			uuids = append(uuids, users[i].Uuid)
+			email := format.UserTag(tag, users[i].Uuid)
+			vc.users.uidMap.Delete(email)
+			if v, ok := vc.dispatcher.Counter.Load(tag); ok {
+				v.(*counter.TrafficCounter).Delete(email)
+			}
+		}
+		vc.trojanss.DelUsers(tag, uuids)
+		return nil
+	}
 	userManager, err := vc.GetUserManager(tag)
 	if err != nil {
 		return fmt.Errorf("get user manager error: %s", err)
@@ -267,6 +281,14 @@ func (v *V2Core) AddUsers(p *AddUsersParams) (added int, err error) {
 	// above still resolves traffic accounting.
 	if p.NodeInfo.Type == "shadowsocksr" {
 		if err := v.ssr.AddUsers(p.Tag, p.Users); err != nil {
+			return 0, err
+		}
+		return len(p.Users), nil
+	}
+	// trojan + ss-obfs: users live in the trojanss Runner (SHA224 map); uidMap
+	// above still resolves traffic accounting.
+	if v.trojanss.Has(p.Tag) {
+		if err := v.trojanss.AddUsers(p.Tag, p.Users); err != nil {
 			return 0, err
 		}
 		return len(p.Users), nil

@@ -8,6 +8,7 @@ package mieru
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/enfein/mieru/v3/pkg/appctl/appctlcommon"
 	pb "github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
@@ -30,6 +31,12 @@ type mieruNS struct {
 	// an explicit false. See forceUserHint for the default.
 	ForceUserHint     *bool `json:"mieru_force_user_hint"`
 	UserHintMandatory *bool `json:"user_hint_mandatory"`
+	// TCPIdleTimeoutSec maps to mieru's SetServerTCPIdleTimeout (seconds). 0 /
+	// unset = never actively close an idle server TCP underlay, which is mieru's
+	// own default and matches a stock mita server on the wire (stealthiest). Set
+	// a positive value only if a connection-pooling relay makes empty underlays
+	// accumulate (CPU). See tcpIdleTimeout.
+	TCPIdleTimeoutSec *int `json:"mieru_tcp_idle_timeout"`
 }
 
 func parseNS(raw json.RawMessage) mieruNS {
@@ -62,6 +69,21 @@ func forceUserHint(info *panel.NodeInfo) bool {
 	return true
 }
 
+// tcpIdleTimeout returns how long a server TCP underlay may stay idle before the
+// mieru Mux actively closes it. Default 0 (never) = mieru's own default, wire-
+// identical to a stock mita server. v2node previously PATCHED mieru to reap idle
+// underlays at 30-60s (to bound empty-underlay accumulation behind a pooling
+// relay), but that gave the server a distinctive "closes idle TCP ~45s" finger-
+// print unlike stock mieru. We now use mieru's official, opt-in mechanism
+// instead, off by default; operators who hit the accumulation can set a value.
+func tcpIdleTimeout(info *panel.NodeInfo) time.Duration {
+	ns := parseNS(info.Common.NetworkSettings)
+	if ns.TCPIdleTimeoutSec != nil && *ns.TCPIdleTimeoutSec > 0 {
+		return time.Duration(*ns.TCPIdleTimeoutSec) * time.Second
+	}
+	return 0
+}
+
 // buildEndpoints maps the panel node (server_port + transport) into mieru
 // underlay endpoints. Single port for now; mieru port-range hopping can be
 // added by passing a PortRange instead of Port.
@@ -73,7 +95,9 @@ func buildEndpoints(info *panel.NodeInfo) ([]mprotocol.UnderlayProperties, error
 	}
 	port := int32(info.Common.ServerPort)
 	pbs := []*pb.PortBinding{{Port: &port, Protocol: &proto}}
-	return appctlcommon.PortBindingsToUnderlayProperties(pbs, mcommon.DefaultMTU)
+	// mieru v3.39 renamed this and added a listen-IP arg (v3.37, issue #286).
+	// Empty listen IP = bind all interfaces, matching the prior behavior.
+	return appctlcommon.AddrPortToUnderlayProperties(info.Common.ListenIP, pbs, mcommon.DefaultMTU)
 }
 
 // buildUserMap builds mieru's registered-user map from panel users.

@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	apicommon "github.com/enfein/mieru/v3/apis/common"
 	"github.com/enfein/mieru/v3/apis/constant"
@@ -17,6 +18,8 @@ import (
 	"github.com/enfein/mieru/v3/pkg/log"
 	"github.com/enfein/mieru/v3/pkg/stderror"
 )
+
+const forwardingWriteTimeout = time.Minute
 
 // handleRequest is used to process socks5 request after authentication.
 func (s *Server) handleRequest(ctx context.Context, req *model.Request, proxyConn net.Conn) error {
@@ -129,15 +132,10 @@ func (s *Server) handleAssociate(ctx context.Context, req *model.Request, proxyC
 	return s.handleAssociatePacketOverStream(ctx, req, proxyConn)
 }
 
-func (s *Server) handleAssociatePacketOverStream(ctx context.Context, _ *model.Request, proxyConn net.Conn) error {
+func (s *Server) handleAssociatePacketOverStream(_ context.Context, _ *model.Request, proxyConn net.Conn) error {
 	// Create a UDP listener on a random port.
 	// All the requests associated to this connection will go through this port.
-	udpListenerAddr, err := apicommon.ResolveUDPAddr(ctx, s.config.Resolver, "udp", common.MaybeDecorateIPv6(common.AllIPAddr())+":0")
-	if err != nil {
-		UDPAssociateErrors.Add(1)
-		return fmt.Errorf("failed to resolve UDP address: %w", err)
-	}
-	udpConn, err := net.ListenUDP("udp", udpListenerAddr)
+	udpConn, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		UDPAssociateErrors.Add(1)
 		return fmt.Errorf("failed to listen UDP: %w", err)
@@ -161,15 +159,10 @@ func (s *Server) handleAssociatePacketOverStream(ctx context.Context, _ *model.R
 	return RunUDPAssociateLoop(udpConn, apicommon.NewPacketOverStreamTunnel(proxyConn), s.config.Resolver)
 }
 
-func (s *Server) handleAssociateDatagram(ctx context.Context, _ *model.Request, proxyConn net.Conn) error {
+func (s *Server) handleAssociateDatagram(_ context.Context, _ *model.Request, proxyConn net.Conn) error {
 	// Create a UDP listener on a random port.
 	// All the requests associated to this connection will go through this port.
-	udpListenerAddr, err := apicommon.ResolveUDPAddr(ctx, s.config.Resolver, "udp", common.MaybeDecorateIPv6(common.AllIPAddr())+":0")
-	if err != nil {
-		UDPAssociateErrors.Add(1)
-		return fmt.Errorf("failed to resolve UDP address: %w", err)
-	}
-	udpConn, err := net.ListenUDP("udp", udpListenerAddr)
+	udpConn, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		UDPAssociateErrors.Add(1)
 		return fmt.Errorf("failed to listen UDP: %w", err)
@@ -226,7 +219,7 @@ func (s *Server) handleForwarding(req *model.Request, proxyConn net.Conn, proxy 
 			egressConn.Close()
 			return fmt.Errorf("failed to write socks5 request to egress proxy: %w", err)
 		}
-		return common.BidiCopy(proxyConn, egressConn)
+		return common.BidiCopy(proxyConn, common.NewWriteTimeoutConn(egressConn, forwardingWriteTimeout))
 	case constant.Socks5UDPAssociateCmd:
 		return s.handleForwardingUDP(req, proxyConn, egressConn)
 	default:
@@ -235,8 +228,15 @@ func (s *Server) handleForwarding(req *model.Request, proxyConn net.Conn, proxy 
 }
 
 func (s *Server) handleForwardingUDP(req *model.Request, proxyConn, egressConn net.Conn) error {
-	// Write UDP associate request to downstream server.
-	if _, err := egressConn.Write(req.Raw); err != nil {
+	// Mita creates a new UDP socket for the downstream proxy, so the client's
+	// requested endpoint does not describe the source of those datagrams. Ask
+	// the downstream proxy to learn Mita's UDP endpoint from the association
+	// instead. Each UDP datagram still carries its actual destination address.
+	downstreamReq := &model.Request{
+		Command: constant.Socks5UDPAssociateCmd,
+		DstAddr: model.AddrSpec{IP: net.IPv4zero, Port: 0},
+	}
+	if err := downstreamReq.WriteToSocks5(egressConn); err != nil {
 		HandshakeErrors.Add(1)
 		egressConn.Close()
 		return fmt.Errorf("failed to write socks5 request to egress proxy: %w", err)

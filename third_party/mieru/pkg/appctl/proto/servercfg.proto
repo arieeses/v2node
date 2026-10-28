@@ -21,7 +21,12 @@ import "appctl/proto/base.proto";
 
 option go_package = "github.com/enfein/mieru/v3/pkg/appctl/appctlpb";
 
+// Proxy server configuration. The next field number is 10.
 message ServerConfig {
+    // The IP address the server listens on.
+    // If not set, the server listens on all interfaces.
+    optional string listenIPAddress = 9;
+
     // Server's port-protocol bindings.
     repeated PortBinding portBindings = 1;
 
@@ -55,12 +60,21 @@ message ServerAdvancedSettings {
 
     // The interval to log metrics.
     // Examples: 30s, 5m, 2h.
+    // Minimum value: 1s.
     // If empty, the default interval is used.
     optional string metricsLoggingInterval = 2;
 
     // If true, proxy clients must provide user hint,
     // otherwise proxy server will refuse to decrypt the network packets.
     optional bool userHintIsMandatory = 3;
+
+    // Server closes TCP underlay if it is idle in both directions
+    // after this amount of time. The TCP underlay is closed even if
+    // there are active sessions attached to the underlay.
+    // Examples: 600s, 15m, 1h.
+    // Minimum value: 1m / 60s.
+    // If empty, there is no idle timeout.
+    optional string tcpIdleTimeout = 4;
 }
 
 message Egress {

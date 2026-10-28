@@ -26,11 +26,15 @@ import (
 	"sync/atomic"
 
 	apicommon "github.com/enfein/mieru/v3/apis/common"
+	"github.com/enfein/mieru/v3/apis/constant"
 	"github.com/enfein/mieru/v3/apis/model"
 	"github.com/enfein/mieru/v3/pkg/common"
 	"github.com/enfein/mieru/v3/pkg/log"
 	"github.com/enfein/mieru/v3/pkg/stderror"
 )
+
+// maxUDPHeaderLen includes RSV, FRAG, ATYP, a length byte, a 255-byte domain, and port.
+const maxUDPHeaderLen = 262
 
 // RunUDPAssociateLoop exchanges socks5 UDP packets between a socks5 proxy client and a mieru proxy server,
 // the proxy server is connected via the PacketOverStreamTunnel.
@@ -84,12 +88,13 @@ func RunUDPAssociateLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamT
 	// Packets from mieru proxy server -> socks5 proxy client.
 	go func() {
 		defer wg.Done()
-		buf := make([]byte, 1<<16)
+		buf := make([]byte, maxUDPHeaderLen+(1<<16))
+		payload := buf[maxUDPHeaderLen:]
 		var n int
 		var addr *net.UDPAddr
 		var err error
 		for {
-			n, addr, err = udpConn.ReadFromUDP(buf)
+			n, addr, err = udpConn.ReadFromUDP(payload)
 			if err != nil {
 				// This is typically due to close of UDP listener.
 				// Don't contribute to UDPAssociateErrors.
@@ -109,7 +114,10 @@ func RunUDPAssociateLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamT
 				header = udpAddrToHeader(addr)
 				addrMap.Store(addr.String(), header)
 			}
-			_, err = conn.Write(append(append([]byte(nil), header...), buf[:n]...))
+			// Cached headers remain independently owned and immutable.
+			start := maxUDPHeaderLen - len(header)
+			copy(buf[start:maxUDPHeaderLen], header)
+			_, err = conn.Write(buf[start : maxUDPHeaderLen+n])
 			if err != nil {
 				log.Debugf("UDP associate %v Write() to proxy client failed: %v", udpConn.LocalAddr(), err)
 				if udpErr.Load() == nil {
@@ -129,7 +137,16 @@ func RunUDPAssociateLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamT
 // RunUDPForwardingLoop exchanges socks5 UDP packets between a mieru proxy client and a socks5 proxy server,
 // the proxy client is connected via the PacketOverStreamTunnel.
 func RunUDPForwardingLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStreamTunnel, downstreamAddr *net.UDPAddr, ctrlConn net.Conn) error {
-	var udpErr atomic.Value
+	var udpErr error
+	var closeOnce sync.Once
+	closeAll := func(err error) {
+		closeOnce.Do(func() {
+			udpErr = err
+			ctrlConn.Close()
+			udpConn.Close()
+			conn.Close()
+		})
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(3)
@@ -139,13 +156,7 @@ func RunUDPForwardingLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStream
 		defer wg.Done()
 		buf := make([]byte, 1)
 		_, err := ctrlConn.Read(buf)
-		if err != nil {
-			if udpErr.Load() == nil {
-				udpErr.Store(err)
-			}
-		}
-		udpConn.Close()
-		conn.Close()
+		closeAll(err)
 	}()
 
 	// Packets from mieru proxy client -> socks5 proxy server.
@@ -156,9 +167,7 @@ func RunUDPForwardingLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStream
 		for {
 			n, err := conn.Read(buf)
 			if err != nil {
-				if udpErr.Load() == nil {
-					udpErr.Store(err)
-				}
+				closeAll(err)
 				return
 			}
 			ws, err := udpConn.WriteToUDP(buf[:n], downstreamAddr)
@@ -182,17 +191,13 @@ func RunUDPForwardingLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStream
 				if !stderror.IsEOF(err) && !stderror.IsClosed(err) {
 					log.Debugf("UDP forwarding %v ReadFromUDP() failed: %v", udpConn.LocalAddr(), err)
 				}
-				if udpErr.Load() == nil {
-					udpErr.Store(err)
-				}
+				closeAll(err)
 				return
 			}
 			_, err = conn.Write(buf[:n])
 			if err != nil {
 				log.Debugf("UDP forwarding %v Write() to client failed: %v", udpConn.LocalAddr(), err)
-				if udpErr.Load() == nil {
-					udpErr.Store(err)
-				}
+				closeAll(err)
 				return
 			}
 			UDPAssociateDownloadPackets.Add(1)
@@ -201,11 +206,64 @@ func RunUDPForwardingLoop(udpConn *net.UDPConn, conn *apicommon.PacketOverStream
 	}()
 
 	wg.Wait()
-	ctrlConn.Close()
-	if err := udpErr.Load(); err != nil {
-		return err.(error)
+	return udpErr
+}
+
+// TransceiveUDPPacket sends a single UDP associate message and returns the response.
+func TransceiveUDPPacket(conn *net.UDPConn, proxyAddr, dstAddr *net.UDPAddr, payload []byte) ([]byte, error) {
+	header := []byte{0, 0, 0}
+	if dstAddr.IP.To4() != nil {
+		header = append(header, constant.Socks5IPv4Address)
+		header = append(header, dstAddr.IP.To4()...)
+		header = append(header, byte(dstAddr.Port>>8))
+		header = append(header, byte(dstAddr.Port))
+	} else {
+		header = append(header, constant.Socks5IPv6Address)
+		header = append(header, dstAddr.IP.To16()...)
+		header = append(header, byte(dstAddr.Port>>8))
+		header = append(header, byte(dstAddr.Port))
 	}
-	return nil
+	if _, err := conn.WriteToUDP(append(header, payload...), proxyAddr); err != nil {
+		return nil, fmt.Errorf("WriteToUDP() failed: %v", err)
+	}
+	buf := make([]byte, 65536)
+	n, readAddr, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		return nil, fmt.Errorf("ReadFromUDP() failed: %v", err)
+	}
+	if readAddr.Port != proxyAddr.Port {
+		// We don't compare the IP address because a wildcard address like 0.0.0.0 can be used.
+		return nil, fmt.Errorf("unexpected read from a different address")
+	}
+	if n < 4 {
+		return nil, fmt.Errorf("UDP associate response is too short")
+	}
+	switch buf[3] {
+	case constant.Socks5IPv4Address:
+		if n <= 10 {
+			return nil, fmt.Errorf("UDP associate response is too short for IPv4 address")
+		}
+		// Header length is 10 bytes.
+		return buf[10:n], nil
+	case constant.Socks5IPv6Address:
+		if n <= 22 {
+			return nil, fmt.Errorf("UDP associate response is too short for IPv6 address")
+		}
+		// Header length is 22 bytes.
+		return buf[22:n], nil
+	case constant.Socks5FQDNAddress:
+		if n < 5 {
+			return nil, fmt.Errorf("UDP associate response is too short for FQDN address")
+		}
+		domainLen := int(buf[4])
+		headerLen := 7 + domainLen
+		if n <= headerLen {
+			return nil, fmt.Errorf("UDP associate response is too short for FQDN address")
+		}
+		return buf[headerLen:n], nil
+	default:
+		return nil, fmt.Errorf("UDP associate unsupported address type: %d", buf[3])
+	}
 }
 
 // runUDPAssociateDatagramLoop exchanges RFC 1928 SOCKS5 UDP datagrams between

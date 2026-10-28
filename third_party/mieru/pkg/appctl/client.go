@@ -200,17 +200,28 @@ func NewClientManagementRPCClient() (appctlgrpc.ClientManagementServiceClient, e
 	return newClientManagementRPCClient(rpcAddr)
 }
 
-// IsClientDaemonRunning detects if client daemon is running by using
+// GetClientStatusWithRPC gets client application status via
 // ClientManagementService.GetStatus() RPC.
-func IsClientDaemonRunning(ctx context.Context) error {
+func GetClientStatusWithRPC(ctx context.Context) (*pb.AppStatusMsg, error) {
 	client, err := NewClientManagementRPCClient()
 	if err != nil {
-		return fmt.Errorf("NewClientManagementRPCClient() failed: %w", err)
+		return nil, fmt.Errorf("NewClientManagementRPCClient() failed: %w", err)
 	}
 	timedctx, cancelFunc := context.WithTimeout(ctx, RPCTimeout)
 	defer cancelFunc()
-	if _, err = client.GetStatus(timedctx, &emptypb.Empty{}); err != nil {
-		return fmt.Errorf("ClientManagementService.GetStatus() failed: %w", err)
+	status, err := client.GetStatus(timedctx, &emptypb.Empty{})
+	if err != nil {
+		return nil, fmt.Errorf("ClientManagementService.GetStatus() failed: %w", err)
+	}
+	return status, nil
+}
+
+// IsClientDaemonRunning detects if client daemon is running by using
+// ClientManagementService.GetStatus() RPC.
+func IsClientDaemonRunning(ctx context.Context) error {
+	_, err := GetClientStatusWithRPC(ctx)
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -337,6 +348,25 @@ func ApplyJSONClientConfig(path string) error {
 	return applyClientConfig(c)
 }
 
+// ReplaceJSONClientConfig replaces the saved client config with a complete JSON config.
+func ReplaceJSONClientConfig(path string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("os.ReadFile(%q) failed: %w", path, err)
+	}
+	config := &pb.ClientConfig{}
+	if err = common.UnmarshalJSON(b, config); err != nil {
+		return fmt.Errorf("common.UnmarshalJSON() failed: %w", err)
+	}
+	if err = ValidateFullClientConfig(config); err != nil {
+		return fmt.Errorf("ValidateFullClientConfig() failed: %w", err)
+	}
+	if err = StoreClientConfig(config); err != nil {
+		return fmt.Errorf("StoreClientConfig() failed: %w", err)
+	}
+	return nil
+}
+
 // ParseURLClientConfig parses a client config URL and returns the config
 // without applying it.
 func ParseURLClientConfig(u string) (*pb.ClientConfig, error) {
@@ -396,10 +426,10 @@ func DeleteClientConfigProfile(profileName string) error {
 // ValidateClientConfigPatch validates a patch of client config.
 //
 // A client config patch must satisfy:
-// 1. it has 0 or more profile
-// 2. each profile is valid
-// 3. for each socks5 authentication, the user and password are not empty
-// 4. metrics logging interval is valid, and it is not less than 1 second
+//   - it has 0 or more profiles
+//   - each profile is valid
+//   - for each socks5 authentication, the user and password are not empty
+//   - if set, metrics logging interval is valid, and it is not less than 1 second
 func ValidateClientConfigPatch(patch *pb.ClientConfig) error {
 	for _, profile := range patch.GetProfiles() {
 		if err := appctlcommon.ValidateClientConfigSingleProfile(profile); err != nil {
@@ -429,12 +459,12 @@ func ValidateClientConfigPatch(patch *pb.ClientConfig) error {
 // ValidateFullClientConfig validates the full client config.
 //
 // In addition to ValidateClientConfigPatch, it also validates:
-// 1. there is at least 1 profile
-// 2. the active profile is available
-// 3. RPC port is valid
-// 4. socks5 port is valid
-// 5. RPC port, socks5 port, http proxy port are different
-// 6. if set, metrics logging interval is valid, and it is not less than 1 second
+//   - there is at least 1 profile
+//   - the active profile name is not empty and matches a profile in the config
+//   - RPC port is between 0 and 65535; 0 disables RPC
+//   - socks5 port is between 1 and 65535
+//   - if set, HTTP proxy port is between 1 and 65535
+//   - RPC port and socks5 port are different, and HTTP proxy port, if set, differs from both
 func ValidateFullClientConfig(config *pb.ClientConfig) error {
 	if err := ValidateClientConfigPatch(config); err != nil {
 		return err

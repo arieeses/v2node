@@ -17,6 +17,7 @@ package protocol
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	mrand "math/rand"
@@ -73,7 +74,8 @@ type Mux struct {
 	multiplexFactor int
 
 	// ---- server only fields ----
-	serverUsers serveruser.Registry
+	serverUsers          serveruser.Registry
+	serverTCPIdleTimeout time.Duration // protected by mu
 }
 
 var _ net.Listener = &Mux{}
@@ -136,30 +138,49 @@ func (m *Mux) flushServerUserCacheMetrics() {
 // If mux is started and new endpoints are added, mux also starts
 // to listen to those new endpoints. In that case, old endpoints
 // are not impacted.
+// Listener failures are logged. Use UpdateEndpoints to receive the errors.
 func (m *Mux) SetEndpoints(endpoints []UnderlayProperties) *Mux {
+	if err := m.UpdateEndpoints(endpoints); err != nil {
+		log.Errorf("Update mux endpoints failed: %v", err)
+	}
+	return m
+}
+
+// UpdateEndpoints updates the configured endpoints before startup or on a client.
+// On a running server, it adds listeners while retaining all existing endpoints.
+// It returns listener errors without stopping the mux. Successful additions remain
+// active even if another endpoint fails; failed endpoints can be retried.
+func (m *Mux) UpdateEndpoints(endpoints []UnderlayProperties) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	select {
+	case <-m.done:
+		return io.ErrClosedPipe
+	default:
+	}
+	if m.isClient || !m.used {
+		m.endpoints = endpoints
+		return nil
+	}
 	new := m.newEndpoints(m.endpoints, endpoints)
-	if len(new) > 0 {
-		if m.used {
-			select {
-			case <-m.done:
-				log.Infof("Unable to add new endpoint after multiplexer is closed")
-			default:
-				var wg sync.WaitGroup
-				for _, p := range new {
-					wg.Add(1)
-					go m.acceptUnderlayLoop(m.ctx, p, &wg)
-				}
-				wg.Wait()
-				m.endpoints = endpoints
-			}
+	var wg sync.WaitGroup
+	results := make([]*muxAcceptErr, len(new))
+	for i, p := range new {
+		results[i] = newMuxAcceptErr()
+		wg.Add(1)
+		go m.acceptUnderlayLoop(m.ctx, p, &wg, results[i])
+	}
+	wg.Wait()
+	var errs []error
+	for i, result := range results {
+		if err := result.get(); err != nil {
+			errs = append(errs, err)
 		} else {
-			m.endpoints = new
+			m.endpoints = append(m.endpoints, new[i])
 		}
 	}
 	log.Infof("Mux now has %d endpoints", len(m.endpoints))
-	return m
+	return errors.Join(errs...)
 }
 
 // SetDialer updates the dialer used by the mux.
@@ -275,6 +296,23 @@ func (m *Mux) SetServerUserHintIsMandatory(userHintIsMandatory bool) *Mux {
 	return m
 }
 
+// SetServerTCPIdleTimeout sets how long a server TCP underlay can be idle in
+// both directions before it is closed. Zero disables the timeout. Changes apply
+// to existing and new underlays at the next maintenance cycle.
+func (m *Mux) SetServerTCPIdleTimeout(timeout time.Duration) *Mux {
+	if m.isClient {
+		panic("Can't set server TCP idle timeout in client mux")
+	}
+	if timeout < 0 {
+		panic("Server TCP idle timeout can't be negative")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.serverTCPIdleTimeout = timeout
+	log.Infof("Mux server TCP idle timeout is set to %v", timeout)
+	return m
+}
+
 func (m *Mux) Accept() (net.Conn, error) {
 	select {
 	case <-m.acceptErr.done:
@@ -354,7 +392,7 @@ func (m *Mux) Start() error {
 	var wg sync.WaitGroup
 	for _, p := range m.endpoints {
 		wg.Add(1)
-		go m.acceptUnderlayLoop(m.ctx, p, &wg)
+		go m.acceptUnderlayLoop(m.ctx, p, &wg, m.acceptErr)
 	}
 	wg.Wait()
 	acceptErr := m.acceptErr.get()
@@ -454,12 +492,12 @@ func (m *Mux) newEndpoints(old, new []UnderlayProperties) []UnderlayProperties {
 	return newEndpoints
 }
 
-func (m *Mux) acceptUnderlayLoop(ctx context.Context, properties UnderlayProperties, wg *sync.WaitGroup) {
+func (m *Mux) acceptUnderlayLoop(ctx context.Context, properties UnderlayProperties, wg *sync.WaitGroup, acceptErr *muxAcceptErr) {
 	laddr := properties.LocalAddr().String()
 	if laddr == "" {
 		err := fmt.Errorf("underlay local address is empty")
 		log.Errorf("%v", err)
-		m.acceptErr.set(err)
+		acceptErr.set(err)
 		wg.Done()
 		return
 	}
@@ -471,7 +509,7 @@ func (m *Mux) acceptUnderlayLoop(ctx context.Context, properties UnderlayPropert
 		if err != nil {
 			err = fmt.Errorf("resolve TCP address %q failed: %w", laddr, err)
 			log.Errorf("%v", err)
-			m.acceptErr.set(err)
+			acceptErr.set(err)
 			wg.Done()
 			return
 		}
@@ -479,7 +517,7 @@ func (m *Mux) acceptUnderlayLoop(ctx context.Context, properties UnderlayPropert
 		if err != nil {
 			err = fmt.Errorf("listen %s %s failed: %w", tcpAddr.Network(), tcpAddr.String(), err)
 			log.Errorf("%v", err)
-			m.acceptErr.set(err)
+			acceptErr.set(err)
 			wg.Done()
 			return
 		}
@@ -544,7 +582,7 @@ func (m *Mux) acceptUnderlayLoop(ctx context.Context, properties UnderlayPropert
 		if err != nil {
 			err = fmt.Errorf("resolve UDP address %q failed: %w", laddr, err)
 			log.Errorf("%v", err)
-			m.acceptErr.set(err)
+			acceptErr.set(err)
 			wg.Done()
 			return
 		}
@@ -552,7 +590,7 @@ func (m *Mux) acceptUnderlayLoop(ctx context.Context, properties UnderlayPropert
 		if err != nil {
 			err = fmt.Errorf("listen %s %s failed: %w", udpAddr.Network(), udpAddr.String(), err)
 			log.Errorf("%v", err)
-			m.acceptErr.set(err)
+			acceptErr.set(err)
 			wg.Done()
 			return
 		}
@@ -609,7 +647,7 @@ func (m *Mux) acceptUnderlayLoop(ctx context.Context, properties UnderlayPropert
 	default:
 		err := fmt.Errorf("unsupported underlay network type %q", network)
 		log.Errorf("%v", err)
-		m.acceptErr.set(err)
+		acceptErr.set(err)
 		wg.Done()
 	}
 }
@@ -630,6 +668,7 @@ func (m *Mux) serverWrapTCPConn(rawConn net.Conn, mtu int, trafficPattern *appct
 	var source serveruser.Source
 	if rawConn != nil {
 		source = serveruser.SourceFromAddr(rawConn.RemoteAddr())
+		rawConn = common.NewIdleTrackingConn(rawConn)
 	}
 	return &StreamUnderlay{
 		baseUnderlay:       *newBaseUnderlay(false, mtu, trafficPattern),
@@ -760,7 +799,12 @@ func (m *Mux) cleanUnderlay(alsoDisableIdleOrOverloadUnderlay bool) {
 		select {
 		case <-underlay.Done():
 		default:
-			// Close idle underlay.
+			if !m.isClient && m.serverTCPIdleTimeout > 0 {
+				if stream, ok := underlay.(*StreamUnderlay); ok && stream.closeIfIdle(m.serverTCPIdleTimeout) {
+					close++
+					continue
+				}
+			}
 			if underlay.SessionCount() == 0 && underlay.Scheduler().Idle() {
 				underlay.Close()
 				close++
@@ -769,22 +813,14 @@ func (m *Mux) cleanUnderlay(alsoDisableIdleOrOverloadUnderlay bool) {
 				n++
 			}
 
-			// v2node patch: try to disable scheduling on an idle (session-less)
-			// underlay for BOTH client and server. Upstream only did this for the
-			// client (guarded by alsoDisableIdleOrOverloadUnderlay), so a server
-			// never set disableTime, Scheduler().Idle() stayed false forever, and
-			// empty server underlays were never closed above. Behind a connection-
-			// pooling relay that holds sockets open, those empty underlays (each
-			// keeping ~2 goroutines) accumulated without bound until GC stack
-			// scanning pegged the CPU. Disabling then closing them (only when
-			// SessionCount()==0) bounds the count; active underlays are untouched.
-			if underlay.SessionCount() == 0 {
-				if underlay.Scheduler().TryDisableIdle() {
-					disable++
-				}
-			}
-
 			if alsoDisableIdleOrOverloadUnderlay {
+				// Try disable scheduling in idle underlay.
+				if underlay.SessionCount() == 0 {
+					if underlay.Scheduler().TryDisableIdle() {
+						disable++
+					}
+				}
+
 				// Disable scheduling in overloaded underlay.
 				// If multiplexFactor is 1, the limit is 1 GiB.
 				var trafficVolumeLimit int64 = 512 * 1024 * 1024 << m.multiplexFactor

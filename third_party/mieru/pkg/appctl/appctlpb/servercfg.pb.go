@@ -88,8 +88,12 @@ func (EgressAction) EnumDescriptor() ([]byte, []int) {
 	return file_appctl_proto_servercfg_proto_rawDescGZIP(), []int{0}
 }
 
+// Proxy server configuration. The next field number is 10.
 type ServerConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
+	// The IP address the server listens on.
+	// If not set, the server listens on all interfaces.
+	ListenIPAddress *string `protobuf:"bytes,9,opt,name=listenIPAddress,proto3,oneof" json:"listenIPAddress,omitempty"`
 	// Server's port-protocol bindings.
 	PortBindings []*PortBinding `protobuf:"bytes,1,rep,name=portBindings,proto3" json:"portBindings,omitempty"`
 	// A list of registered users.
@@ -140,6 +144,13 @@ func (x *ServerConfig) ProtoReflect() protoreflect.Message {
 // Deprecated: Use ServerConfig.ProtoReflect.Descriptor instead.
 func (*ServerConfig) Descriptor() ([]byte, []int) {
 	return file_appctl_proto_servercfg_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *ServerConfig) GetListenIPAddress() string {
+	if x != nil && x.ListenIPAddress != nil {
+		return *x.ListenIPAddress
+	}
+	return ""
 }
 
 func (x *ServerConfig) GetPortBindings() []*PortBinding {
@@ -202,13 +213,21 @@ type ServerAdvancedSettings struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The interval to log metrics.
 	// Examples: 30s, 5m, 2h.
+	// Minimum value: 1s.
 	// If empty, the default interval is used.
 	MetricsLoggingInterval *string `protobuf:"bytes,2,opt,name=metricsLoggingInterval,proto3,oneof" json:"metricsLoggingInterval,omitempty"`
 	// If true, proxy clients must provide user hint,
 	// otherwise proxy server will refuse to decrypt the network packets.
 	UserHintIsMandatory *bool `protobuf:"varint,3,opt,name=userHintIsMandatory,proto3,oneof" json:"userHintIsMandatory,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Server closes TCP underlay if it is idle in both directions
+	// after this amount of time. The TCP underlay is closed even if
+	// there are active sessions attached to the underlay.
+	// Examples: 600s, 15m, 1h.
+	// Minimum value: 1m / 60s.
+	// If empty, there is no idle timeout.
+	TcpIdleTimeout *string `protobuf:"bytes,4,opt,name=tcpIdleTimeout,proto3,oneof" json:"tcpIdleTimeout,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ServerAdvancedSettings) Reset() {
@@ -253,6 +272,13 @@ func (x *ServerAdvancedSettings) GetUserHintIsMandatory() bool {
 		return *x.UserHintIsMandatory
 	}
 	return false
+}
+
+func (x *ServerAdvancedSettings) GetTcpIdleTimeout() string {
+	if x != nil && x.TcpIdleTimeout != nil {
+		return *x.TcpIdleTimeout
+	}
+	return ""
 }
 
 type Egress struct {
@@ -525,27 +551,31 @@ var File_appctl_proto_servercfg_proto protoreflect.FileDescriptor
 
 const file_appctl_proto_servercfg_proto_rawDesc = "" +
 	"\n" +
-	"\x1cappctl/proto/servercfg.proto\x12\fmieru.appctl\x1a\x17appctl/proto/base.proto\"\xa6\x04\n" +
-	"\fServerConfig\x12=\n" +
+	"\x1cappctl/proto/servercfg.proto\x12\fmieru.appctl\x1a\x17appctl/proto/base.proto\"\xe9\x04\n" +
+	"\fServerConfig\x12-\n" +
+	"\x0flistenIPAddress\x18\t \x01(\tH\x00R\x0flistenIPAddress\x88\x01\x01\x12=\n" +
 	"\fportBindings\x18\x01 \x03(\v2\x19.mieru.appctl.PortBindingR\fportBindings\x12(\n" +
 	"\x05users\x18\x02 \x03(\v2\x12.mieru.appctl.UserR\x05users\x12U\n" +
-	"\x10advancedSettings\x18\x03 \x01(\v2$.mieru.appctl.ServerAdvancedSettingsH\x00R\x10advancedSettings\x88\x01\x01\x12C\n" +
-	"\floggingLevel\x18\x04 \x01(\x0e2\x1a.mieru.appctl.LoggingLevelH\x01R\floggingLevel\x88\x01\x01\x12\x15\n" +
-	"\x03mtu\x18\x05 \x01(\x05H\x02R\x03mtu\x88\x01\x01\x121\n" +
-	"\x06egress\x18\x06 \x01(\v2\x14.mieru.appctl.EgressH\x03R\x06egress\x88\x01\x01\x12(\n" +
-	"\x03dns\x18\a \x01(\v2\x11.mieru.appctl.DNSH\x04R\x03dns\x88\x01\x01\x12I\n" +
-	"\x0etrafficPattern\x18\b \x01(\v2\x1c.mieru.appctl.TrafficPatternH\x05R\x0etrafficPattern\x88\x01\x01B\x13\n" +
+	"\x10advancedSettings\x18\x03 \x01(\v2$.mieru.appctl.ServerAdvancedSettingsH\x01R\x10advancedSettings\x88\x01\x01\x12C\n" +
+	"\floggingLevel\x18\x04 \x01(\x0e2\x1a.mieru.appctl.LoggingLevelH\x02R\floggingLevel\x88\x01\x01\x12\x15\n" +
+	"\x03mtu\x18\x05 \x01(\x05H\x03R\x03mtu\x88\x01\x01\x121\n" +
+	"\x06egress\x18\x06 \x01(\v2\x14.mieru.appctl.EgressH\x04R\x06egress\x88\x01\x01\x12(\n" +
+	"\x03dns\x18\a \x01(\v2\x11.mieru.appctl.DNSH\x05R\x03dns\x88\x01\x01\x12I\n" +
+	"\x0etrafficPattern\x18\b \x01(\v2\x1c.mieru.appctl.TrafficPatternH\x06R\x0etrafficPattern\x88\x01\x01B\x12\n" +
+	"\x10_listenIPAddressB\x13\n" +
 	"\x11_advancedSettingsB\x0f\n" +
 	"\r_loggingLevelB\x06\n" +
 	"\x04_mtuB\t\n" +
 	"\a_egressB\x06\n" +
 	"\x04_dnsB\x11\n" +
-	"\x0f_trafficPattern\"\xc5\x01\n" +
+	"\x0f_trafficPattern\"\x85\x02\n" +
 	"\x16ServerAdvancedSettings\x12;\n" +
 	"\x16metricsLoggingInterval\x18\x02 \x01(\tH\x00R\x16metricsLoggingInterval\x88\x01\x01\x125\n" +
-	"\x13userHintIsMandatory\x18\x03 \x01(\bH\x01R\x13userHintIsMandatory\x88\x01\x01B\x19\n" +
+	"\x13userHintIsMandatory\x18\x03 \x01(\bH\x01R\x13userHintIsMandatory\x88\x01\x01\x12+\n" +
+	"\x0etcpIdleTimeout\x18\x04 \x01(\tH\x02R\x0etcpIdleTimeout\x88\x01\x01B\x19\n" +
 	"\x17_metricsLoggingIntervalB\x16\n" +
-	"\x14_userHintIsMandatoryJ\x04\b\x01\x10\x02\"m\n" +
+	"\x14_userHintIsMandatoryB\x11\n" +
+	"\x0f_tcpIdleTimeoutJ\x04\b\x01\x10\x02\"m\n" +
 	"\x06Egress\x123\n" +
 	"\aproxies\x18\x01 \x03(\v2\x19.mieru.appctl.EgressProxyR\aproxies\x12.\n" +
 	"\x05rules\x18\x02 \x03(\v2\x18.mieru.appctl.EgressRuleR\x05rules\"\xa4\x02\n" +

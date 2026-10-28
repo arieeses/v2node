@@ -17,6 +17,7 @@ package protocol
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	apicommon "github.com/enfein/mieru/v3/apis/common"
+	"github.com/enfein/mieru/v3/internal/bufpool"
 	"github.com/enfein/mieru/v3/pkg/appctl/appctlpb"
 	"github.com/enfein/mieru/v3/pkg/cipher"
 	"github.com/enfein/mieru/v3/pkg/common"
@@ -374,8 +376,8 @@ func (t *StreamUnderlay) readOneSegment() (*segment, error) {
 	}
 	encryptedMeta := make([]byte, readLen)
 	if n, err := io.ReadFull(t.conn, encryptedMeta); err != nil {
-		if stderror.IsTimeout(err) && n == 0 {
-			// No TCP data received. Caller will retry.
+		if stderror.IsTimeout(err) && n == 0 && !errors.Is(err, net.ErrClosed) {
+			// Retry read deadlines, but don't retry when underlay is closed.
 			return nil, nil
 		}
 		err = fmt.Errorf("metadata: read %d bytes from StreamUnderlay failed: %w", readLen, err)
@@ -477,9 +479,17 @@ func (t *StreamUnderlay) readSessionSegment(ss *sessionStruct) (*segment, error)
 	var decryptedPayload []byte
 	var err error
 
+	var paddingBuf *bufpool.Buffer
+	if ss.suffixLen > 0 {
+		paddingBuf = bufpool.Acquire(int(ss.suffixLen))
+		defer paddingBuf.Release()
+	}
+
 	if ss.payloadLen > 0 {
-		encryptedPayload := make([]byte, ss.payloadLen+cipher.DefaultOverhead)
+		buf := bufpool.Acquire(int(ss.payloadLen) + cipher.DefaultOverhead)
+		encryptedPayload := buf.Bytes()
 		if _, err := io.ReadFull(t.conn, encryptedPayload); err != nil {
+			buf.Release()
 			err = fmt.Errorf("payload: read %d bytes from StreamUnderlay failed: %w", ss.payloadLen+cipher.DefaultOverhead, err)
 			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
 		}
@@ -493,6 +503,8 @@ func (t *StreamUnderlay) readSessionSegment(ss *sessionStruct) (*segment, error)
 			replay.KnownSession.Add(1)
 		}
 		decryptedPayload, err = t.recv.Decrypt(encryptedPayload)
+		// Decrypt returns independently owned plaintext.
+		buf.Release()
 		if t.isClient {
 			cipher.ClientDirectDecrypt.Add(1)
 		} else {
@@ -509,7 +521,7 @@ func (t *StreamUnderlay) readSessionSegment(ss *sessionStruct) (*segment, error)
 		}
 	}
 	if ss.suffixLen > 0 {
-		padding := make([]byte, ss.suffixLen)
+		padding := paddingBuf.Bytes()
 		if _, err := io.ReadFull(t.conn, padding); err != nil {
 			err = fmt.Errorf("padding: read %d bytes from StreamUnderlay failed: %w", ss.suffixLen, err)
 			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
@@ -534,8 +546,14 @@ func (t *StreamUnderlay) readDataAckSegment(das *dataAckStruct) (*segment, error
 	var decryptedPayload []byte
 	var err error
 
+	var paddingBuf *bufpool.Buffer
+	if das.prefixLen > 0 || das.suffixLen > 0 {
+		paddingBuf = bufpool.Acquire(int(mathext.Max(das.prefixLen, das.suffixLen)))
+		defer paddingBuf.Release()
+	}
+
 	if das.prefixLen > 0 {
-		padding1 := make([]byte, das.prefixLen)
+		padding1 := paddingBuf.Bytes()[:das.prefixLen]
 		if _, err := io.ReadFull(t.conn, padding1); err != nil {
 			err = fmt.Errorf("padding: read %d bytes from StreamUnderlay failed: %w", das.prefixLen, err)
 			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
@@ -549,8 +567,10 @@ func (t *StreamUnderlay) readDataAckSegment(das *dataAckStruct) (*segment, error
 	}
 	if das.payloadLen > 0 {
 		wirePayloadLen := int(das.payloadLen) + cipher.DefaultOverhead
-		encryptedPayload := make([]byte, wirePayloadLen)
+		buf := bufpool.Acquire(wirePayloadLen)
+		encryptedPayload := buf.Bytes()
 		if _, err := io.ReadFull(t.conn, encryptedPayload); err != nil {
+			buf.Release()
 			err = fmt.Errorf("payload: read %d bytes from StreamUnderlay failed: %w", wirePayloadLen, err)
 			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
 		}
@@ -563,6 +583,7 @@ func (t *StreamUnderlay) readDataAckSegment(das *dataAckStruct) (*segment, error
 		if isLowEntropyProtocol(das.Protocol()) {
 			encryptedPayload, err = decodeLowEntropyEncryptedPayload(encryptedPayload, das)
 			if err != nil {
+				buf.Release()
 				err = fmt.Errorf("decode low entropy payload failed: %w", err)
 				return nil, stderror.WrapErrorWithType(err, stderror.PROTOCOL_ERROR)
 			}
@@ -571,6 +592,8 @@ func (t *StreamUnderlay) readDataAckSegment(das *dataAckStruct) (*segment, error
 			replay.KnownSession.Add(1)
 		}
 		decryptedPayload, err = t.recv.Decrypt(encryptedPayload)
+		// Decrypt returns independently owned plaintext.
+		buf.Release()
 		if t.isClient {
 			cipher.ClientDirectDecrypt.Add(1)
 		} else {
@@ -587,7 +610,7 @@ func (t *StreamUnderlay) readDataAckSegment(das *dataAckStruct) (*segment, error
 		}
 	}
 	if das.suffixLen > 0 {
-		padding2 := make([]byte, das.suffixLen)
+		padding2 := paddingBuf.Bytes()[:das.suffixLen]
 		if _, err := io.ReadFull(t.conn, padding2); err != nil {
 			err = fmt.Errorf("padding: read %d bytes from StreamUnderlay failed: %w", das.suffixLen, err)
 			return nil, stderror.WrapErrorWithType(err, stderror.NETWORK_ERROR)
@@ -640,7 +663,9 @@ func (t *StreamUnderlay) writeOneSegment(seg *segment) error {
 		if len(seg.payload) > 0 {
 			encryptedPayloadLen = len(seg.payload) + t.send.Overhead()
 		}
-		dataToSend := make([]byte, encryptedMetadataLen+encryptedPayloadLen+len(padding))
+		buf := bufpool.Acquire(encryptedMetadataLen + encryptedPayloadLen + len(padding))
+		defer buf.Release()
+		dataToSend := buf.Bytes()
 		if err := t.send.Encrypt(dataToSend[:0], plaintextMetadata); err != nil {
 			return fmt.Errorf("Encrypt() failed: %w", err)
 		}
@@ -695,7 +720,9 @@ func (t *StreamUnderlay) writeOneSegment(seg *segment) error {
 				wirePayloadLen = int(das.payloadLen) + t.send.Overhead()
 			}
 		}
-		dataToSend := make([]byte, encryptedMetadataLen+len(padding1)+wirePayloadLen+len(padding2))
+		buf := bufpool.Acquire(encryptedMetadataLen + len(padding1) + wirePayloadLen + len(padding2))
+		defer buf.Release()
+		dataToSend := buf.Bytes()
 		if err := t.send.Encrypt(dataToSend[:0], plaintextMetadata); err != nil {
 			return fmt.Errorf("Encrypt() failed: %w", err)
 		}
@@ -855,4 +882,29 @@ func (t *StreamUnderlay) cleanSessions() {
 		}
 		return true
 	})
+}
+
+// closeIfIdle closes the transport to interrupt blocked reads, writes, or
+// session delivery, if the transport is idle.
+func (t *StreamUnderlay) closeIfIdle(timeout time.Duration) bool {
+	t.closeMutex.Lock()
+	defer t.closeMutex.Unlock()
+	select {
+	case <-t.done:
+		return false
+	default:
+	}
+	conn, ok := t.conn.(*common.IdleTrackingConn)
+	if !ok || !conn.CloseIfIdle(timeout) {
+		return false
+	}
+	log.Debugf("Closing %v after TCP idle timeout %v", t, timeout)
+	t.sessionCleanTicker.Stop()
+	// The transport is already closed, so skip graceful session close requests.
+	t.sessionMap.Range(func(k, v any) bool {
+		v.(*Session).closeWithError(stderror.ErrTimeout)
+		return true
+	})
+	t.baseUnderlay.Close()
+	return true
 }
