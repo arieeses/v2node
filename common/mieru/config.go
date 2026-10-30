@@ -19,6 +19,34 @@ import (
 	panel "github.com/wyx2685/v2node/api/v2board"
 )
 
+// flexBool / flexInt unmarshal a JSON bool/number OR its string form. The
+// panel's admin JSON editor stores every network_settings value as a string
+// ("true", "1400", "0"); with a plain *bool/*int the strict decoder fails that
+// one field, leaves the allocated pointer's value at zero, and so silently
+// flips a configured "true" to false (and a custom mtu to 0 → default). Parsing
+// them leniently keeps these knobs working no matter how the panel serialized
+// them. Same fix as common/trojanss' flexBool for ss_obfs.enabled.
+type flexBool bool
+
+func (b *flexBool) UnmarshalJSON(data []byte) error {
+	s := strings.ToLower(strings.Trim(strings.TrimSpace(string(data)), `"`))
+	*b = s == "true" || s == "1"
+	return nil
+}
+
+type flexInt int
+
+func (n *flexInt) UnmarshalJSON(data []byte) error {
+	s := strings.Trim(strings.TrimSpace(string(data)), `"`)
+	if s == "" || s == "null" {
+		return nil
+	}
+	if v, err := strconv.Atoi(s); err == nil {
+		*n = flexInt(v)
+	}
+	return nil
+}
+
 // mieruNS is the mieru-specific slice of the panel node's network_settings.
 // The panel (v2board/Xboard mieru patch) reuses network_settings and puts the
 // transport (TCP/UDP) and an optional traffic pattern there.
@@ -37,20 +65,20 @@ type mieruNS struct {
 	// mieru's own default (1400). The operation docs recommend lowering it (e.g.
 	// 1280, the floor) on both ends when a path MTU mismatch throttles UDP-
 	// transport speed. Only affects the UDP underlay; ignored for TCP transport.
-	MTU *int `json:"mtu"`
+	MTU *flexInt `json:"mtu"`
 	// ForceUserHint / UserHintMandatory both map to mieru's
 	// SetServerUserHintIsMandatory. Two keys are accepted so either a
 	// soga-style panel field (mieru_force_user_hint) or a heki-style one
 	// (user_hint_mandatory) works. Pointers so "unset" is distinguishable from
 	// an explicit false. See forceUserHint for the default.
-	ForceUserHint     *bool `json:"mieru_force_user_hint"`
-	UserHintMandatory *bool `json:"user_hint_mandatory"`
+	ForceUserHint     *flexBool `json:"mieru_force_user_hint"`
+	UserHintMandatory *flexBool `json:"user_hint_mandatory"`
 	// TCPIdleTimeoutSec maps to mieru's SetServerTCPIdleTimeout (seconds). 0 /
 	// unset = never actively close an idle server TCP underlay, which is mieru's
 	// own default and matches a stock mita server on the wire (stealthiest). Set
 	// a positive value only if a connection-pooling relay makes empty underlays
 	// accumulate (CPU). See tcpIdleTimeout.
-	TCPIdleTimeoutSec *int `json:"mieru_tcp_idle_timeout"`
+	TCPIdleTimeoutSec *flexInt `json:"mieru_tcp_idle_timeout"`
 }
 
 func parseNS(raw json.RawMessage) mieruNS {
@@ -75,10 +103,10 @@ func parseNS(raw json.RawMessage) mieruNS {
 func forceUserHint(info *panel.NodeInfo) bool {
 	ns := parseNS(info.Common.NetworkSettings)
 	if ns.ForceUserHint != nil {
-		return *ns.ForceUserHint
+		return bool(*ns.ForceUserHint)
 	}
 	if ns.UserHintMandatory != nil {
-		return *ns.UserHintMandatory
+		return bool(*ns.UserHintMandatory)
 	}
 	return true
 }
@@ -92,8 +120,8 @@ func forceUserHint(info *panel.NodeInfo) bool {
 // instead, off by default; operators who hit the accumulation can set a value.
 func tcpIdleTimeout(info *panel.NodeInfo) time.Duration {
 	ns := parseNS(info.Common.NetworkSettings)
-	if ns.TCPIdleTimeoutSec != nil && *ns.TCPIdleTimeoutSec > 0 {
-		return time.Duration(*ns.TCPIdleTimeoutSec) * time.Second
+	if ns.TCPIdleTimeoutSec != nil && int(*ns.TCPIdleTimeoutSec) > 0 {
+		return time.Duration(int(*ns.TCPIdleTimeoutSec)) * time.Second
 	}
 	return 0
 }
@@ -151,8 +179,8 @@ func buildEndpoints(info *panel.NodeInfo) ([]mprotocol.UnderlayProperties, error
 	// MTU: operator-configurable (network_settings.mtu), default 1400, floored at
 	// mieru's minimum 1280. Only meaningful for the UDP underlay.
 	mtu := mcommon.DefaultMTU
-	if ns.MTU != nil && *ns.MTU >= 1280 {
-		mtu = *ns.MTU
+	if ns.MTU != nil && int(*ns.MTU) >= 1280 {
+		mtu = int(*ns.MTU)
 	}
 	// mieru v3.39 renamed this and added a listen-IP arg (v3.37, issue #286).
 	// Empty listen IP = bind all interfaces, matching the prior behavior.
