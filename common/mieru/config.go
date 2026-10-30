@@ -7,6 +7,7 @@ package mieru
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +25,19 @@ import (
 type mieruNS struct {
 	Transport      string `json:"transport"`
 	TrafficPattern string `json:"traffic_pattern"`
+	// Ports lets a node listen on MANY ports instead of only server_port — the
+	// operation docs recommend a larger port range so a firewall closing idle
+	// ports (and port-scan based blocking) is harder. Format mirrors mihomo's
+	// client port-range: a single range "2012-2022", a single port, or a comma-
+	// separated mix "2012-2022,2027". Empty = just server_port (prior behavior).
+	// The same value should be put on the client (network_settings.ports flows to
+	// the subscription's port-range) so client and server agree on the range.
+	Ports string `json:"ports"`
+	// MTU is the UDP-transport max payload size mieru wraps packets to. Unset =
+	// mieru's own default (1400). The operation docs recommend lowering it (e.g.
+	// 1280, the floor) on both ends when a path MTU mismatch throttles UDP-
+	// transport speed. Only affects the UDP underlay; ignored for TCP transport.
+	MTU *int `json:"mtu"`
 	// ForceUserHint / UserHintMandatory both map to mieru's
 	// SetServerUserHintIsMandatory. Two keys are accepted so either a
 	// soga-style panel field (mieru_force_user_hint) or a heki-style one
@@ -84,20 +98,65 @@ func tcpIdleTimeout(info *panel.NodeInfo) time.Duration {
 	return 0
 }
 
-// buildEndpoints maps the panel node (server_port + transport) into mieru
-// underlay endpoints. Single port for now; mieru port-range hopping can be
-// added by passing a PortRange instead of Port.
+// portBindings turns the node's port spec into mieru PortBindings. spec is the
+// network_settings.ports string ("2012-2022" range, a single port, or a comma-
+// separated mix); empty falls back to the single server_port. Ranges are left
+// as PortRange on the binding — mieru's AddrPortToUnderlayProperties flattens
+// them (FlatPortBindings) into one listener per port. If every token is
+// unparseable we fall back to server_port rather than binding nothing.
+func portBindings(spec string, serverPort int, proto pb.TransportProtocol) []*pb.PortBinding {
+	single := func() []*pb.PortBinding {
+		p := int32(serverPort)
+		pr := proto
+		return []*pb.PortBinding{{Port: &p, Protocol: &pr}}
+	}
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return single()
+	}
+	out := make([]*pb.PortBinding, 0)
+	for _, tok := range strings.Split(spec, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		pr := proto
+		if strings.Contains(tok, "-") {
+			r := tok
+			out = append(out, &pb.PortBinding{PortRange: &r, Protocol: &pr})
+			continue
+		}
+		n, err := strconv.Atoi(tok)
+		if err != nil || n < 1 || n > 65535 {
+			continue
+		}
+		p := int32(n)
+		out = append(out, &pb.PortBinding{Port: &p, Protocol: &pr})
+	}
+	if len(out) == 0 {
+		return single()
+	}
+	return out
+}
+
+// buildEndpoints maps the panel node (server_port/ports + transport) into mieru
+// underlay endpoints.
 func buildEndpoints(info *panel.NodeInfo) ([]mprotocol.UnderlayProperties, error) {
 	ns := parseNS(info.Common.NetworkSettings)
 	proto := pb.TransportProtocol_TCP
 	if strings.EqualFold(ns.Transport, "UDP") {
 		proto = pb.TransportProtocol_UDP
 	}
-	port := int32(info.Common.ServerPort)
-	pbs := []*pb.PortBinding{{Port: &port, Protocol: &proto}}
+	pbs := portBindings(ns.Ports, info.Common.ServerPort, proto)
+	// MTU: operator-configurable (network_settings.mtu), default 1400, floored at
+	// mieru's minimum 1280. Only meaningful for the UDP underlay.
+	mtu := mcommon.DefaultMTU
+	if ns.MTU != nil && *ns.MTU >= 1280 {
+		mtu = *ns.MTU
+	}
 	// mieru v3.39 renamed this and added a listen-IP arg (v3.37, issue #286).
 	// Empty listen IP = bind all interfaces, matching the prior behavior.
-	return appctlcommon.AddrPortToUnderlayProperties(info.Common.ListenIP, pbs, mcommon.DefaultMTU)
+	return appctlcommon.AddrPortToUnderlayProperties(info.Common.ListenIP, pbs, mtu)
 }
 
 // buildUserMap builds mieru's registered-user map from panel users.
