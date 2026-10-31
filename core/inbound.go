@@ -261,6 +261,13 @@ func buildInbound(nodeInfo *panel.NodeInfo, tag string, disableSniffing bool, li
 				},
 				RejectUnknownSNI: nodeInfo.Common.CertInfo.RejectUnknownSni,
 			}
+			// ECH: the panel stores the server ECH keys (Go crypto/tls
+			// EncryptedClientHelloKey marshaling) in tls_settings.ech_key and
+			// down-links them inside tls_settings. Feed them to xray so the inbound
+			// can decrypt the inner ClientHello; empty = ECH off (unchanged behavior).
+			if nodeInfo.Common.CertInfo.EchKey != "" {
+				in.StreamSetting.TLSSettings.ECHServerKeys = nodeInfo.Common.CertInfo.EchKey
+			}
 			if nodeInfo.Type == "hysteria2" || nodeInfo.Type == "tuic" {
 				alpnList := &coreConf.StringList{"h3"}
 				in.StreamSetting.TLSSettings.ALPN = alpnList
@@ -462,7 +469,32 @@ func buildVMess(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig)
 func buildTrojan(nodeInfo *panel.NodeInfo, inbound *coreConf.InboundDetourConfig) error {
 	inbound.Protocol = "trojan"
 	v := nodeInfo.Common
-	s, err := json.Marshal(&coreConf.TrojanServerConfig{})
+	trojanCfg := &coreConf.TrojanServerConfig{}
+	// Optional fallback (TCP+TLS only): a probe that completes TLS and passes the
+	// SNI whitelist but is not a real trojan client is forwarded to a real site
+	// instead of being reset — stronger camouflage than a bare reject. Read from
+	// network_settings.fallback ("80" | "127.0.0.1:8080" | {dest,xver,...}) or
+	// network_settings.fallbacks ([...]). Absent = no fallback (unchanged behavior).
+	if len(v.NetworkSettings) > 0 {
+		var fbWrap struct {
+			Fallback  json.RawMessage                   `json:"fallback"`
+			Fallbacks []*coreConf.TrojanInboundFallback `json:"fallbacks"`
+		}
+		if json.Unmarshal(v.NetworkSettings, &fbWrap) == nil {
+			switch {
+			case len(fbWrap.Fallbacks) > 0:
+				trojanCfg.Fallbacks = fbWrap.Fallbacks
+			case len(fbWrap.Fallback) > 0:
+				var fbObj coreConf.TrojanInboundFallback
+				if json.Unmarshal(fbWrap.Fallback, &fbObj) == nil && len(fbObj.Dest) > 0 {
+					trojanCfg.Fallbacks = []*coreConf.TrojanInboundFallback{&fbObj}
+				} else {
+					trojanCfg.Fallbacks = []*coreConf.TrojanInboundFallback{{Dest: fbWrap.Fallback}}
+				}
+			}
+		}
+	}
+	s, err := json.Marshal(trojanCfg)
 	if err != nil {
 		return fmt.Errorf("marshal trojan settings error: %s", err)
 	}

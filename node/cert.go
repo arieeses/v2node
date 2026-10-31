@@ -67,6 +67,24 @@ func (c *Controller) requestCert() error {
 		if err != nil {
 			return fmt.Errorf("generate self cert error: %s", err)
 		}
+	case "remote":
+		// The panel generated the (self-signed) cert and its pin
+		// (pinned_peer_cert_sha256, down-linked to clients) and ships the PEM in
+		// tls_settings.tls_cert/tls_key. Write it to disk so xray serves exactly the
+		// cert the client pins. Rewritten on every (re)build so a rotated panel cert
+		// takes effect (a tls_cert change triggers nodeNeedsRebuild).
+		if cert.CertFile == "" || cert.KeyFile == "" {
+			return fmt.Errorf("cert file path or key file path not exist")
+		}
+		if cert.TlsCert == "" || cert.TlsKey == "" {
+			return fmt.Errorf("remote certmode requires tls_cert/tls_key from panel")
+		}
+		if err := os.WriteFile(cert.CertFile, []byte(cert.TlsCert), 0644); err != nil {
+			return fmt.Errorf("write remote cert error: %s", err)
+		}
+		if err := os.WriteFile(cert.KeyFile, []byte(cert.TlsKey), 0600); err != nil {
+			return fmt.Errorf("write remote key error: %s", err)
+		}
 	default:
 		return fmt.Errorf("unsupported certmode: %s", cert.CertMode)
 	}

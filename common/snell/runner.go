@@ -15,6 +15,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/sagernet/sing-snell/snellv6"
@@ -40,12 +42,29 @@ type snellService interface {
 	UpdateUsers(users []string, userKeys [][]byte) error
 }
 
+// flexInt tolerates a JSON number OR its string form. The panel's admin JSON
+// editor stores network_settings values as strings ("6"); a plain int field
+// then fails the strict decoder and stays 0 — which would silently downgrade a
+// configured snell v6 node to the v4/v5 path. Same fix as common/mieru.
+type flexInt int
+
+func (n *flexInt) UnmarshalJSON(data []byte) error {
+	s := strings.Trim(strings.TrimSpace(string(data)), `"`)
+	if s == "" || s == "null" {
+		return nil
+	}
+	if v, err := strconv.Atoi(s); err == nil {
+		*n = flexInt(v)
+	}
+	return nil
+}
+
 // snellSettings is the subset of the node's network_settings the runner needs.
 type snellSettings struct {
-	Version int    `json:"version"`
-	PSK     string `json:"psk"`     // shared node PSK (12..255 bytes)
-	Obfs    string `json:"obfs"`    // v4/v5 only: "" | "http" | "tls"
-	Mode    string `json:"v6_mode"` // v6 only: "default" | "unshaped"
+	Version flexInt `json:"version"`
+	PSK     string  `json:"psk"`     // shared node PSK (12..255 bytes)
+	Obfs    string  `json:"obfs"`    // v4/v5 only: "" | "http" | "tls"
+	Mode    string  `json:"v6_mode"` // v6 only: "default" | "unshaped"
 }
 
 // Runner owns one snell node's MultiService + listener and bridges to the
@@ -88,7 +107,7 @@ func (r *Runner) startLocked() error {
 	s := r.settings()
 
 	var svc snellService
-	if s.Version >= 6 {
+	if int(s.Version) >= 6 {
 		// v6: ONE shared node PSK does all the AEAD; users are told apart by a
 		// per-user ClientID the client sends (O(1) map lookup, no per-user crypto).
 		psk := []byte(s.PSK)
@@ -134,7 +153,7 @@ func (r *Runner) startLocked() error {
 	r.svc = svc
 	r.ln = ln
 	go r.acceptLoop(ln, svc)
-	log.WithFields(log.Fields{"tag": r.tag, "port": r.info.Common.ServerPort, "version": s.Version}).Info("snell server started")
+	log.WithFields(log.Fields{"tag": r.tag, "port": r.info.Common.ServerPort, "version": int(s.Version)}).Info("snell server started")
 	return nil
 }
 

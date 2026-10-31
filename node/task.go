@@ -50,7 +50,7 @@ func (c *Controller) startTasks(node *panel.NodeInfo) {
 	_ = c.userReportPeriodic.Start(true)
 	if node.Security == panel.Tls {
 		switch c.info.Common.CertInfo.CertMode {
-		case "none", "", "file", "self":
+		case "none", "", "file", "self", "remote":
 		default:
 			c.renewCertPeriodic = &task.Task{
 				Name:     "renewCertTask",
@@ -97,7 +97,9 @@ func nodeNeedsRebuild(old, new *panel.NodeInfo) bool {
 	if o.TlsSettings.ServerName != n.TlsSettings.ServerName ||
 		o.TlsSettings.PrivateKey != n.TlsSettings.PrivateKey ||
 		o.TlsSettings.Dest != n.TlsSettings.Dest ||
-		o.TlsSettings.CertMode != n.TlsSettings.CertMode {
+		o.TlsSettings.CertMode != n.TlsSettings.CertMode ||
+		o.TlsSettings.EchKey != n.TlsSettings.EchKey ||
+		o.TlsSettings.TlsCert != n.TlsSettings.TlsCert {
 		return true
 	}
 	// Security type change

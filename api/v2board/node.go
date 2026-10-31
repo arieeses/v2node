@@ -108,6 +108,9 @@ type TlsSettings struct {
 	Provider         string   `json:"provider"`
 	DNSEnv           string   `json:"dns_env"`
 	RejectUnknownSni string   `json:"reject_unknown_sni"`
+	EchKey           string   `json:"ech_key"`
+	TlsCert          string   `json:"tls_cert"`
+	TlsKey           string   `json:"tls_key"`
 }
 
 type CertInfo struct {
@@ -119,6 +122,9 @@ type CertInfo struct {
 	DNSEnv           map[string]string
 	Provider         string
 	RejectUnknownSni bool
+	EchKey           string
+	TlsCert          string
+	TlsKey           string
 }
 
 type EncSettings struct {
@@ -307,6 +313,9 @@ func (c *Client) finalizeNode(node *NodeInfo, cm *CommonNode) {
 		DNSEnv:           make(map[string]string),
 		Provider:         cm.TlsSettings.Provider,
 		RejectUnknownSni: cm.TlsSettings.RejectUnknownSni == "1",
+		EchKey:           cm.TlsSettings.EchKey,
+		TlsCert:          cm.TlsSettings.TlsCert,
+		TlsKey:           cm.TlsSettings.TlsKey,
 	}
 	if cm.CertInfo.CertMode == "dns" && cm.TlsSettings.DNSEnv != "" {
 		for _, env := range strings.Split(cm.TlsSettings.DNSEnv, ",") {
